@@ -1,0 +1,5390 @@
+<roblox version="4">
+  <Item class="HttpService" referent="0">
+    <Properties>
+      <string name="Name">HttpService</string>
+      <bool name="HttpEnabled">true</bool>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="1">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">Events</string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="3">
+      <Properties>
+        <string name="Name">TS</string>
+      </Properties>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">NetworkedSignalDescriptions</string>
+          <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.2.3
+local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
+local t = TS.import(script, TS.getModule(script, "@rbxts", "t").lib.ts).t
+local _ptr = {}
+local _left = "ProjectileCreated"
+local _arg0 = {
+	name = "ProjectileCreated",
+	typeChecks = { t.instanceOf("Model"), t.Vector3, t.Vector3, t.Vector3, t.Color3 },
+}
+_ptr[_left] = _arg0
+local _left_1 = "ShootHumanoid"
+local _arg0_1 = {
+	name = "ShootHumanoid",
+	typeChecks = { t.instanceOf("Humanoid") },
+}
+_ptr[_left_1] = _arg0_1
+local NetworkedSignalDescriptions = _ptr
+return {
+	NetworkedSignalDescriptions = NetworkedSignalDescriptions,
+}
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="5">
+        <Properties>
+          <string name="Name">util</string>
+        </Properties>
+        <Item class="ModuleScript" referent="6">
+          <Properties>
+            <string name="Name">getHumanoid</string>
+            <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.2.3
+local function getHumanoid(instance)
+	local model = instance:FindFirstAncestorWhichIsA("Model")
+	if model then
+		local humanoid = model:FindFirstChildWhichIsA("Humanoid")
+		if humanoid then
+			return humanoid
+		end
+		return getHumanoid(model)
+	end
+end
+return {
+	getHumanoid = getHumanoid,
+}
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+    <Item class="Folder" referent="7">
+      <Properties>
+        <string name="Name">rbxts_include</string>
+      </Properties>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">Promise</string>
+          <string name="Source"><![CDATA[--[[
+	An implementation of Promises similar to Promise/A+.
+]]
+
+local ERROR_NON_PROMISE_IN_LIST = "Non-promise value passed into %s at index %s"
+local ERROR_NON_LIST = "Please pass a list of promises to %s"
+local ERROR_NON_FUNCTION = "Please pass a handler function to %s!"
+local MODE_KEY_METATABLE = {__mode = "k"}
+
+--[[
+	Creates an enum dictionary with some metamethods to prevent common mistakes.
+]]
+local function makeEnum(enumName, members)
+	local enum = {}
+
+	for _, memberName in ipairs(members) do
+		enum[memberName] = memberName
+	end
+
+	return setmetatable(enum, {
+		__index = function(_, k)
+			error(string.format("%s is not in %s!", k, enumName), 2)
+		end,
+		__newindex = function()
+			error(string.format("Creating new members in %s is not allowed!", enumName), 2)
+		end,
+	})
+end
+
+--[[
+	An object to represent runtime errors that occur during execution.
+	Promises that experience an error like this will be rejected with
+	an instance of this object.
+]]
+local Error do
+	Error = {
+		Kind = makeEnum("Promise.Error.Kind", {
+			"ExecutionError",
+			"AlreadyCancelled",
+			"NotResolvedInTime",
+			"TimedOut",
+		}),
+	}
+	Error.__index = Error
+
+	function Error.new(options, parent)
+		options = options or {}
+		return setmetatable({
+			error = tostring(options.error) or "[This error has no error text.]",
+			trace = options.trace,
+			context = options.context,
+			kind = options.kind,
+			parent = parent,
+			createdTick = os.clock(),
+			createdTrace = debug.traceback(),
+		}, Error)
+	end
+
+	function Error.is(anything)
+		if type(anything) == "table" then
+			local metatable = getmetatable(anything)
+
+			if type(metatable) == "table" then
+				return rawget(anything, "error") ~= nil and type(rawget(metatable, "extend")) == "function"
+			end
+		end
+
+		return false
+	end
+
+	function Error.isKind(anything, kind)
+		assert(kind ~= nil, "Argument #2 to Promise.Error.isKind must not be nil")
+
+		return Error.is(anything) and anything.kind == kind
+	end
+
+	function Error:extend(options)
+		options = options or {}
+
+		options.kind = options.kind or self.kind
+
+		return Error.new(options, self)
+	end
+
+	function Error:getErrorChain()
+		local runtimeErrors = { self }
+
+		while runtimeErrors[#runtimeErrors].parent do
+			table.insert(runtimeErrors, runtimeErrors[#runtimeErrors].parent)
+		end
+
+		return runtimeErrors
+	end
+
+	function Error:__tostring()
+		local errorStrings = {
+			string.format("-- Promise.Error(%s) --", self.kind or "?"),
+		}
+
+		for _, runtimeError in ipairs(self:getErrorChain()) do
+			table.insert(errorStrings, table.concat({
+				runtimeError.trace or runtimeError.error,
+				runtimeError.context,
+			}, "\n"))
+		end
+
+		return table.concat(errorStrings, "\n")
+	end
+end
+
+--[[
+	Packs a number of arguments into a table and returns its length.
+
+	Used to cajole varargs without dropping sparse values.
+]]
+local function pack(...)
+	return select("#", ...), { ... }
+end
+
+--[[
+	Returns first value (success), and packs all following values.
+]]
+local function packResult(success, ...)
+	return success, select("#", ...), { ... }
+end
+
+
+local function makeErrorHandler(traceback)
+	assert(traceback ~= nil)
+
+	return function(err)
+		-- If the error object is already a table, forward it directly.
+		-- Should we extend the error here and add our own trace?
+
+		if type(err) == "table" then
+			return err
+		end
+
+		return Error.new({
+			error = err,
+			kind = Error.Kind.ExecutionError,
+			trace = debug.traceback(tostring(err), 2),
+			context = "Promise created at:\n\n" .. traceback,
+		})
+	end
+end
+
+--[[
+	Calls a Promise executor with error handling.
+]]
+local function runExecutor(traceback, callback, ...)
+	return packResult(xpcall(callback, makeErrorHandler(traceback), ...))
+end
+
+--[[
+	Creates a function that invokes a callback with correct error handling and
+	resolution mechanisms.
+]]
+local function createAdvancer(traceback, callback, resolve, reject)
+	return function(...)
+		local ok, resultLength, result = runExecutor(traceback, callback, ...)
+
+		if ok then
+			resolve(unpack(result, 1, resultLength))
+		else
+			reject(result[1])
+		end
+	end
+end
+
+local function isEmpty(t)
+	return next(t) == nil
+end
+
+local Promise = {
+	Error = Error,
+	Status = makeEnum("Promise.Status", {"Started", "Resolved", "Rejected", "Cancelled"}),
+	_getTime = os.clock,
+	_timeEvent = game:GetService("RunService").Heartbeat,
+}
+Promise.prototype = {}
+Promise.__index = Promise.prototype
+
+--[[
+	Constructs a new Promise with the given initializing callback.
+
+	This is generally only called when directly wrapping a non-promise API into
+	a promise-based version.
+
+	The callback will receive 'resolve' and 'reject' methods, used to start
+	invoking the promise chain.
+
+	Second parameter, parent, is used internally for tracking the "parent" in a
+	promise chain. External code shouldn't need to worry about this.
+]]
+function Promise._new(traceback, callback, parent)
+	if parent ~= nil and not Promise.is(parent) then
+		error("Argument #2 to Promise.new must be a promise or nil", 2)
+	end
+
+	local self = {
+		-- Used to locate where a promise was created
+		_source = traceback,
+
+		_status = Promise.Status.Started,
+
+		-- A table containing a list of all results, whether success or failure.
+		-- Only valid if _status is set to something besides Started
+		_values = nil,
+
+		-- Lua doesn't like sparse arrays very much, so we explicitly store the
+		-- length of _values to handle middle nils.
+		_valuesLength = -1,
+
+		-- Tracks if this Promise has no error observers..
+		_unhandledRejection = true,
+
+		-- Queues representing functions we should invoke when we update!
+		_queuedResolve = {},
+		_queuedReject = {},
+		_queuedFinally = {},
+
+		-- The function to run when/if this promise is cancelled.
+		_cancellationHook = nil,
+
+		-- The "parent" of this promise in a promise chain. Required for
+		-- cancellation propagation upstream.
+		_parent = parent,
+
+		-- Consumers are Promises that have chained onto this one.
+		-- We track them for cancellation propagation downstream.
+		_consumers = setmetatable({}, MODE_KEY_METATABLE),
+	}
+
+	if parent and parent._status == Promise.Status.Started then
+		parent._consumers[self] = true
+	end
+
+	setmetatable(self, Promise)
+
+	local function resolve(...)
+		self:_resolve(...)
+	end
+
+	local function reject(...)
+		self:_reject(...)
+	end
+
+	local function onCancel(cancellationHook)
+		if cancellationHook then
+			if self._status == Promise.Status.Cancelled then
+				cancellationHook()
+			else
+				self._cancellationHook = cancellationHook
+			end
+		end
+
+		return self._status == Promise.Status.Cancelled
+	end
+
+	coroutine.wrap(function()
+		local ok, _, result = runExecutor(
+			self._source,
+			callback,
+			resolve,
+			reject,
+			onCancel
+		)
+
+		if not ok then
+			reject(result[1])
+		end
+	end)()
+
+	return self
+end
+
+function Promise.new(executor)
+	return Promise._new(debug.traceback(nil, 2), executor)
+end
+
+function Promise:__tostring()
+	return string.format("Promise(%s)", self:getStatus())
+end
+
+--[[
+	Promise.new, except pcall on a new thread is automatic.
+]]
+function Promise.defer(callback)
+	local traceback = debug.traceback(nil, 2)
+	local promise
+	promise = Promise._new(traceback, function(resolve, reject, onCancel)
+		local connection
+		connection = Promise._timeEvent:Connect(function()
+			connection:Disconnect()
+			local ok, _, result = runExecutor(traceback, callback, resolve, reject, onCancel)
+
+			if not ok then
+				reject(result[1])
+			end
+		end)
+	end)
+
+	return promise
+end
+
+-- Backwards compatibility
+Promise.async = Promise.defer
+
+--[[
+	Create a promise that represents the immediately resolved value.
+]]
+function Promise.resolve(...)
+	local length, values = pack(...)
+	return Promise._new(debug.traceback(nil, 2), function(resolve)
+		resolve(unpack(values, 1, length))
+	end)
+end
+
+--[[
+	Create a promise that represents the immediately rejected value.
+]]
+function Promise.reject(...)
+	local length, values = pack(...)
+	return Promise._new(debug.traceback(nil, 2), function(_, reject)
+		reject(unpack(values, 1, length))
+	end)
+end
+
+--[[
+	Runs a non-promise-returning function as a Promise with the
+  given arguments.
+]]
+function Promise._try(traceback, callback, ...)
+	local valuesLength, values = pack(...)
+
+	return Promise._new(traceback, function(resolve)
+		resolve(callback(unpack(values, 1, valuesLength)))
+	end)
+end
+
+--[[
+	Begins a Promise chain, turning synchronous errors into rejections.
+]]
+function Promise.try(...)
+	return Promise._try(debug.traceback(nil, 2), ...)
+end
+
+--[[
+	Returns a new promise that:
+		* is resolved when all input promises resolve
+		* is rejected if ANY input promises reject
+]]
+function Promise._all(traceback, promises, amount)
+	if type(promises) ~= "table" then
+		error(string.format(ERROR_NON_LIST, "Promise.all"), 3)
+	end
+
+	-- We need to check that each value is a promise here so that we can produce
+	-- a proper error rather than a rejected promise with our error.
+	for i, promise in pairs(promises) do
+		if not Promise.is(promise) then
+			error(string.format(ERROR_NON_PROMISE_IN_LIST, "Promise.all", tostring(i)), 3)
+		end
+	end
+
+	-- If there are no values then return an already resolved promise.
+	if #promises == 0 or amount == 0 then
+		return Promise.resolve({})
+	end
+
+	return Promise._new(traceback, function(resolve, reject, onCancel)
+		-- An array to contain our resolved values from the given promises.
+		local resolvedValues = {}
+		local newPromises = {}
+
+		-- Keep a count of resolved promises because just checking the resolved
+		-- values length wouldn't account for promises that resolve with nil.
+		local resolvedCount = 0
+		local rejectedCount = 0
+		local done = false
+
+		local function cancel()
+			for _, promise in ipairs(newPromises) do
+				promise:cancel()
+			end
+		end
+
+		-- Called when a single value is resolved and resolves if all are done.
+		local function resolveOne(i, ...)
+			if done then
+				return
+			end
+
+			resolvedCount = resolvedCount + 1
+
+			if amount == nil then
+				resolvedValues[i] = ...
+			else
+				resolvedValues[resolvedCount] = ...
+			end
+
+			if resolvedCount >= (amount or #promises) then
+				done = true
+				resolve(resolvedValues)
+				cancel()
+			end
+		end
+
+		onCancel(cancel)
+
+		-- We can assume the values inside `promises` are all promises since we
+		-- checked above.
+		for i, promise in ipairs(promises) do
+			newPromises[i] = promise:andThen(
+				function(...)
+					resolveOne(i, ...)
+				end,
+				function(...)
+					rejectedCount = rejectedCount + 1
+
+					if amount == nil or #promises - rejectedCount < amount then
+						cancel()
+						done = true
+
+						reject(...)
+					end
+				end
+			)
+		end
+
+		if done then
+			cancel()
+		end
+	end)
+end
+
+function Promise.all(promises)
+	return Promise._all(debug.traceback(nil, 2), promises)
+end
+
+function Promise.fold(list, callback, initialValue)
+	assert(type(list) == "table", "Bad argument #1 to Promise.fold: must be a table")
+	assert(type(callback) == "function", "Bad argument #2 to Promise.fold: must be a function")
+
+	local accumulator = Promise.resolve(initialValue)
+	return Promise.each(list, function(resolvedElement, i)
+		accumulator = accumulator:andThen(function(previousValueResolved)
+			return callback(previousValueResolved, resolvedElement, i)
+		end)
+	end):andThenReturn(accumulator)
+end
+
+function Promise.some(promises, amount)
+	assert(type(amount) == "number", "Bad argument #2 to Promise.some: must be a number")
+
+	return Promise._all(debug.traceback(nil, 2), promises, amount)
+end
+
+function Promise.any(promises)
+	return Promise._all(debug.traceback(nil, 2), promises, 1):andThen(function(values)
+		return values[1]
+	end)
+end
+
+function Promise.allSettled(promises)
+	if type(promises) ~= "table" then
+		error(string.format(ERROR_NON_LIST, "Promise.allSettled"), 2)
+	end
+
+	-- We need to check that each value is a promise here so that we can produce
+	-- a proper error rather than a rejected promise with our error.
+	for i, promise in pairs(promises) do
+		if not Promise.is(promise) then
+			error(string.format(ERROR_NON_PROMISE_IN_LIST, "Promise.allSettled", tostring(i)), 2)
+		end
+	end
+
+	-- If there are no values then return an already resolved promise.
+	if #promises == 0 then
+		return Promise.resolve({})
+	end
+
+	return Promise._new(debug.traceback(nil, 2), function(resolve, _, onCancel)
+		-- An array to contain our resolved values from the given promises.
+		local fates = {}
+		local newPromises = {}
+
+		-- Keep a count of resolved promises because just checking the resolved
+		-- values length wouldn't account for promises that resolve with nil.
+		local finishedCount = 0
+
+		-- Called when a single value is resolved and resolves if all are done.
+		local function resolveOne(i, ...)
+			finishedCount = finishedCount + 1
+
+			fates[i] = ...
+
+			if finishedCount >= #promises then
+				resolve(fates)
+			end
+		end
+
+		onCancel(function()
+			for _, promise in ipairs(newPromises) do
+				promise:cancel()
+			end
+		end)
+
+		-- We can assume the values inside `promises` are all promises since we
+		-- checked above.
+		for i, promise in ipairs(promises) do
+			newPromises[i] = promise:finally(
+				function(...)
+					resolveOne(i, ...)
+				end
+			)
+		end
+	end)
+end
+
+--[[
+	Races a set of Promises and returns the first one that resolves,
+	cancelling the others.
+]]
+function Promise.race(promises)
+	assert(type(promises) == "table", string.format(ERROR_NON_LIST, "Promise.race"))
+
+	for i, promise in pairs(promises) do
+		assert(Promise.is(promise), string.format(ERROR_NON_PROMISE_IN_LIST, "Promise.race", tostring(i)))
+	end
+
+	return Promise._new(debug.traceback(nil, 2), function(resolve, reject, onCancel)
+		local newPromises = {}
+		local finished = false
+
+		local function cancel()
+			for _, promise in ipairs(newPromises) do
+				promise:cancel()
+			end
+		end
+
+		local function finalize(callback)
+			return function (...)
+				cancel()
+				finished = true
+				return callback(...)
+			end
+		end
+
+		if onCancel(finalize(reject)) then
+			return
+		end
+
+		for i, promise in ipairs(promises) do
+			newPromises[i] = promise:andThen(finalize(resolve), finalize(reject))
+		end
+
+		if finished then
+			cancel()
+		end
+	end)
+end
+
+--[[
+	Iterates serially over the given an array of values, calling the predicate callback on each before continuing.
+	If the predicate returns a Promise, we wait for that Promise to resolve before continuing to the next item
+	in the array. If the Promise the predicate returns rejects, the Promise from Promise.each is also rejected with
+	the same value.
+
+	Returns a Promise containing an array of the return values from the predicate for each item in the original list.
+]]
+function Promise.each(list, predicate)
+	assert(type(list) == "table", string.format(ERROR_NON_LIST, "Promise.each"))
+	assert(type(predicate) == "function", string.format(ERROR_NON_FUNCTION, "Promise.each"))
+
+	return Promise._new(debug.traceback(nil, 2), function(resolve, reject, onCancel)
+		local results = {}
+		local promisesToCancel = {}
+
+		local cancelled = false
+
+		local function cancel()
+			for _, promiseToCancel in ipairs(promisesToCancel) do
+				promiseToCancel:cancel()
+			end
+		end
+
+		onCancel(function()
+			cancelled = true
+
+			cancel()
+		end)
+
+		-- We need to preprocess the list of values and look for Promises.
+		-- If we find some, we must register our andThen calls now, so that those Promises have a consumer
+		-- from us registered. If we don't do this, those Promises might get cancelled by something else
+		-- before we get to them in the series because it's not possible to tell that we plan to use it
+		-- unless we indicate it here.
+
+		local preprocessedList = {}
+
+		for index, value in ipairs(list) do
+			if Promise.is(value) then
+				if value:getStatus() == Promise.Status.Cancelled then
+					cancel()
+					return reject(Error.new({
+						error = "Promise is cancelled",
+						kind = Error.Kind.AlreadyCancelled,
+						context = string.format(
+							"The Promise that was part of the array at index %d passed into Promise.each was already cancelled when Promise.each began.\n\nThat Promise was created at:\n\n%s",
+							index,
+							value._source
+						),
+					}))
+				elseif value:getStatus() == Promise.Status.Rejected then
+					cancel()
+					return reject(select(2, value:await()))
+				end
+
+				-- Chain a new Promise from this one so we only cancel ours
+				local ourPromise = value:andThen(function(...)
+					return ...
+				end)
+
+				table.insert(promisesToCancel, ourPromise)
+				preprocessedList[index] = ourPromise
+			else
+				preprocessedList[index] = value
+			end
+		end
+
+		for index, value in ipairs(preprocessedList) do
+			if Promise.is(value) then
+				local success
+				success, value = value:await()
+
+				if not success then
+					cancel()
+					return reject(value)
+				end
+			end
+
+			if cancelled then
+				return
+			end
+
+			local predicatePromise = Promise.resolve(predicate(value, index))
+
+			table.insert(promisesToCancel, predicatePromise)
+
+			local success, result = predicatePromise:await()
+
+			if not success then
+				cancel()
+				return reject(result)
+			end
+
+			results[index] = result
+		end
+
+		resolve(results)
+	end)
+end
+
+--[[
+	Is the given object a Promise instance?
+]]
+function Promise.is(object)
+	if type(object) ~= "table" then
+		return false
+	end
+
+	local objectMetatable = getmetatable(object)
+
+	if objectMetatable == Promise then
+		-- The Promise came from this library.
+		return true
+	elseif objectMetatable == nil then
+		-- No metatable, but we should still chain onto tables with andThen methods
+		return type(object.andThen) == "function"
+	elseif
+		type(objectMetatable) == "table"
+		and type(rawget(objectMetatable, "__index")) == "table"
+		and type(rawget(rawget(objectMetatable, "__index"), "andThen")) == "function"
+	then
+		-- Maybe this came from a different or older Promise library.
+		return true
+	end
+
+	return false
+end
+
+--[[
+	Converts a yielding function into a Promise-returning one.
+]]
+function Promise.promisify(callback)
+	return function(...)
+		return Promise._try(debug.traceback(nil, 2), callback, ...)
+	end
+end
+
+--[[
+	Creates a Promise that resolves after given number of seconds.
+]]
+do
+	-- uses a sorted doubly linked list (queue) to achieve O(1) remove operations and O(n) for insert
+
+	-- the initial node in the linked list
+	local first
+	local connection
+
+	function Promise.delay(seconds)
+		assert(type(seconds) == "number", "Bad argument #1 to Promise.delay, must be a number.")
+		-- If seconds is -INF, INF, NaN, or less than 1 / 60, assume seconds is 1 / 60.
+		-- This mirrors the behavior of wait()
+		if not (seconds >= 1 / 60) or seconds == math.huge then
+			seconds = 1 / 60
+		end
+
+		return Promise._new(debug.traceback(nil, 2), function(resolve, _, onCancel)
+			local startTime = Promise._getTime()
+			local endTime = startTime + seconds
+
+			local node = {
+				resolve = resolve,
+				startTime = startTime,
+				endTime = endTime,
+			}
+
+			if connection == nil then -- first is nil when connection is nil
+				first = node
+				connection = Promise._timeEvent:Connect(function()
+					local threadStart = Promise._getTime()
+
+					while first ~= nil and first.endTime < threadStart do
+						local current = first
+						first = current.next
+
+						if first == nil then
+							connection:Disconnect()
+							connection = nil
+						else
+							first.previous = nil
+						end
+
+						current.resolve(Promise._getTime() - current.startTime)
+					end
+				end)
+			else -- first is non-nil
+				if first.endTime < endTime then -- if `node` should be placed after `first`
+					-- we will insert `node` between `current` and `next`
+					-- (i.e. after `current` if `next` is nil)
+					local current = first
+					local next = current.next
+
+					while next ~= nil and next.endTime < endTime do
+						current = next
+						next = current.next
+					end
+
+					-- `current` must be non-nil, but `next` could be `nil` (i.e. last item in list)
+					current.next = node
+					node.previous = current
+
+					if next ~= nil then
+						node.next = next
+						next.previous = node
+					end
+				else
+					-- set `node` to `first`
+					node.next = first
+					first.previous = node
+					first = node
+				end
+			end
+
+			onCancel(function()
+				-- remove node from queue
+				local next = node.next
+
+				if first == node then
+					if next == nil then -- if `node` is the first and last
+						connection:Disconnect()
+						connection = nil
+					else -- if `node` is `first` and not the last
+						next.previous = nil
+					end
+					first = next
+				else
+					local previous = node.previous
+					-- since `node` is not `first`, then we know `previous` is non-nil
+					previous.next = next
+
+					if next ~= nil then
+						next.previous = previous
+					end
+				end
+			end)
+		end)
+	end
+end
+
+--[[
+	Rejects the promise after `seconds` seconds.
+]]
+function Promise.prototype:timeout(seconds, rejectionValue)
+	local traceback = debug.traceback(nil, 2)
+
+	return Promise.race({
+		Promise.delay(seconds):andThen(function()
+			return Promise.reject(rejectionValue == nil and Error.new({
+				kind = Error.Kind.TimedOut,
+				error = "Timed out",
+				context = string.format(
+					"Timeout of %d seconds exceeded.\n:timeout() called at:\n\n%s",
+					seconds,
+					traceback
+				),
+			}) or rejectionValue)
+		end),
+		self,
+	})
+end
+
+function Promise.prototype:getStatus()
+	return self._status
+end
+
+--[[
+	Creates a new promise that receives the result of this promise.
+
+	The given callbacks are invoked depending on that result.
+]]
+function Promise.prototype:_andThen(traceback, successHandler, failureHandler)
+	self._unhandledRejection = false
+
+	-- Create a new promise to follow this part of the chain
+	return Promise._new(traceback, function(resolve, reject)
+		-- Our default callbacks just pass values onto the next promise.
+		-- This lets success and failure cascade correctly!
+
+		local successCallback = resolve
+		if successHandler then
+			successCallback = createAdvancer(
+				traceback,
+				successHandler,
+				resolve,
+				reject
+			)
+		end
+
+		local failureCallback = reject
+		if failureHandler then
+			failureCallback = createAdvancer(
+				traceback,
+				failureHandler,
+				resolve,
+				reject
+			)
+		end
+
+		if self._status == Promise.Status.Started then
+			-- If we haven't resolved yet, put ourselves into the queue
+			table.insert(self._queuedResolve, successCallback)
+			table.insert(self._queuedReject, failureCallback)
+		elseif self._status == Promise.Status.Resolved then
+			-- This promise has already resolved! Trigger success immediately.
+			successCallback(unpack(self._values, 1, self._valuesLength))
+		elseif self._status == Promise.Status.Rejected then
+			-- This promise died a terrible death! Trigger failure immediately.
+			failureCallback(unpack(self._values, 1, self._valuesLength))
+		elseif self._status == Promise.Status.Cancelled then
+			-- We don't want to call the success handler or the failure handler,
+			-- we just reject this promise outright.
+			reject(Error.new({
+				error = "Promise is cancelled",
+				kind = Error.Kind.AlreadyCancelled,
+				context = "Promise created at\n\n" .. traceback,
+			}))
+		end
+	end, self)
+end
+
+function Promise.prototype:andThen(successHandler, failureHandler)
+	assert(
+		successHandler == nil or type(successHandler) == "function",
+		string.format(ERROR_NON_FUNCTION, "Promise:andThen")
+	)
+	assert(
+		failureHandler == nil or type(failureHandler) == "function",
+		string.format(ERROR_NON_FUNCTION, "Promise:andThen")
+	)
+
+	return self:_andThen(debug.traceback(nil, 2), successHandler, failureHandler)
+end
+
+--[[
+	Used to catch any errors that may have occurred in the promise.
+]]
+function Promise.prototype:catch(failureCallback)
+	assert(
+		failureCallback == nil or type(failureCallback) == "function",
+		string.format(ERROR_NON_FUNCTION, "Promise:catch")
+	)
+	return self:_andThen(debug.traceback(nil, 2), nil, failureCallback)
+end
+
+--[[
+	Like andThen, but the value passed into the handler is also the
+	value returned from the handler.
+]]
+function Promise.prototype:tap(tapCallback)
+	assert(type(tapCallback) == "function", string.format(ERROR_NON_FUNCTION, "Promise:tap"))
+	return self:_andThen(debug.traceback(nil, 2), function(...)
+		local callbackReturn = tapCallback(...)
+
+		if Promise.is(callbackReturn) then
+			local length, values = pack(...)
+			return callbackReturn:andThen(function()
+				return unpack(values, 1, length)
+			end)
+		end
+
+		return ...
+	end)
+end
+
+--[[
+	Calls a callback on `andThen` with specific arguments.
+]]
+function Promise.prototype:andThenCall(callback, ...)
+	assert(type(callback) == "function", string.format(ERROR_NON_FUNCTION, "Promise:andThenCall"))
+	local length, values = pack(...)
+	return self:_andThen(debug.traceback(nil, 2), function()
+		return callback(unpack(values, 1, length))
+	end)
+end
+
+--[[
+	Shorthand for an andThen handler that returns the given value.
+]]
+function Promise.prototype:andThenReturn(...)
+	local length, values = pack(...)
+	return self:_andThen(debug.traceback(nil, 2), function()
+		return unpack(values, 1, length)
+	end)
+end
+
+--[[
+	Cancels the promise, disallowing it from rejecting or resolving, and calls
+	the cancellation hook if provided.
+]]
+function Promise.prototype:cancel()
+	if self._status ~= Promise.Status.Started then
+		return
+	end
+
+	self._status = Promise.Status.Cancelled
+
+	if self._cancellationHook then
+		self._cancellationHook()
+	end
+
+	if self._parent then
+		self._parent:_consumerCancelled(self)
+	end
+
+	for child in pairs(self._consumers) do
+		child:cancel()
+	end
+
+	self:_finalize()
+end
+
+--[[
+	Used to decrease the number of consumers by 1, and if there are no more,
+	cancel this promise.
+]]
+function Promise.prototype:_consumerCancelled(consumer)
+	if self._status ~= Promise.Status.Started then
+		return
+	end
+
+	self._consumers[consumer] = nil
+
+	if next(self._consumers) == nil then
+		self:cancel()
+	end
+end
+
+--[[
+	Used to set a handler for when the promise resolves, rejects, or is
+	cancelled. Returns a new promise chained from this promise.
+]]
+function Promise.prototype:_finally(traceback, finallyHandler, onlyOk)
+	if not onlyOk then
+		self._unhandledRejection = false
+	end
+
+	-- Return a promise chained off of this promise
+	return Promise._new(traceback, function(resolve, reject)
+		local finallyCallback = resolve
+		if finallyHandler then
+			finallyCallback = createAdvancer(
+				traceback,
+				finallyHandler,
+				resolve,
+				reject
+			)
+		end
+
+		if onlyOk then
+			local callback = finallyCallback
+			finallyCallback = function(...)
+				if self._status == Promise.Status.Rejected then
+					return resolve(self)
+				end
+
+				return callback(...)
+			end
+		end
+
+		if self._status == Promise.Status.Started then
+			-- The promise is not settled, so queue this.
+			table.insert(self._queuedFinally, finallyCallback)
+		else
+			-- The promise already settled or was cancelled, run the callback now.
+			finallyCallback(self._status)
+		end
+	end, self)
+end
+
+function Promise.prototype:finally(finallyHandler)
+	assert(
+		finallyHandler == nil or type(finallyHandler) == "function",
+		string.format(ERROR_NON_FUNCTION, "Promise:finally")
+	)
+	return self:_finally(debug.traceback(nil, 2), finallyHandler)
+end
+
+--[[
+	Calls a callback on `finally` with specific arguments.
+]]
+function Promise.prototype:finallyCall(callback, ...)
+	assert(type(callback) == "function", string.format(ERROR_NON_FUNCTION, "Promise:finallyCall"))
+	local length, values = pack(...)
+	return self:_finally(debug.traceback(nil, 2), function()
+		return callback(unpack(values, 1, length))
+	end)
+end
+
+--[[
+	Shorthand for a finally handler that returns the given value.
+]]
+function Promise.prototype:finallyReturn(...)
+	local length, values = pack(...)
+	return self:_finally(debug.traceback(nil, 2), function()
+		return unpack(values, 1, length)
+	end)
+end
+
+--[[
+	Similar to finally, except rejections are propagated through it.
+]]
+function Promise.prototype:done(finallyHandler)
+	assert(
+		finallyHandler == nil or type(finallyHandler) == "function",
+		string.format(ERROR_NON_FUNCTION, "Promise:done")
+	)
+	return self:_finally(debug.traceback(nil, 2), finallyHandler, true)
+end
+
+--[[
+	Calls a callback on `done` with specific arguments.
+]]
+function Promise.prototype:doneCall(callback, ...)
+	assert(type(callback) == "function", string.format(ERROR_NON_FUNCTION, "Promise:doneCall"))
+	local length, values = pack(...)
+	return self:_finally(debug.traceback(nil, 2), function()
+		return callback(unpack(values, 1, length))
+	end, true)
+end
+
+--[[
+	Shorthand for a done handler that returns the given value.
+]]
+function Promise.prototype:doneReturn(...)
+	local length, values = pack(...)
+	return self:_finally(debug.traceback(nil, 2), function()
+		return unpack(values, 1, length)
+	end, true)
+end
+
+--[[
+	Yield until the promise is completed.
+
+	This matches the execution model of normal Roblox functions.
+]]
+function Promise.prototype:awaitStatus()
+	self._unhandledRejection = false
+
+	if self._status == Promise.Status.Started then
+		local bindable = Instance.new("BindableEvent")
+
+		self:finally(function()
+			bindable:Fire()
+		end)
+
+		bindable.Event:Wait()
+		bindable:Destroy()
+	end
+
+	if self._status == Promise.Status.Resolved then
+		return self._status, unpack(self._values, 1, self._valuesLength)
+	elseif self._status == Promise.Status.Rejected then
+		return self._status, unpack(self._values, 1, self._valuesLength)
+	end
+
+	return self._status
+end
+
+local function awaitHelper(status, ...)
+	return status == Promise.Status.Resolved, ...
+end
+
+--[[
+	Calls awaitStatus internally, returns (isResolved, values...)
+]]
+function Promise.prototype:await()
+	return awaitHelper(self:awaitStatus())
+end
+
+local function expectHelper(status, ...)
+	if status ~= Promise.Status.Resolved then
+		error((...) == nil and "Expected Promise rejected with no value." or (...), 3)
+	end
+
+	return ...
+end
+
+--[[
+	Calls await and only returns if the Promise resolves.
+	Throws if the Promise rejects or gets cancelled.
+]]
+function Promise.prototype:expect()
+	return expectHelper(self:awaitStatus())
+end
+
+-- Backwards compatibility
+Promise.prototype.awaitValue = Promise.prototype.expect
+
+--[[
+	Intended for use in tests.
+
+	Similar to await(), but instead of yielding if the promise is unresolved,
+	_unwrap will throw. This indicates an assumption that a promise has
+	resolved.
+]]
+function Promise.prototype:_unwrap()
+	if self._status == Promise.Status.Started then
+		error("Promise has not resolved or rejected.", 2)
+	end
+
+	local success = self._status == Promise.Status.Resolved
+
+	return success, unpack(self._values, 1, self._valuesLength)
+end
+
+function Promise.prototype:_resolve(...)
+	if self._status ~= Promise.Status.Started then
+		if Promise.is((...)) then
+			(...):_consumerCancelled(self)
+		end
+		return
+	end
+
+	-- If the resolved value was a Promise, we chain onto it!
+	if Promise.is((...)) then
+		-- Without this warning, arguments sometimes mysteriously disappear
+		if select("#", ...) > 1 then
+			local message = string.format(
+				"When returning a Promise from andThen, extra arguments are " ..
+				"discarded! See:\n\n%s",
+				self._source
+			)
+			warn(message)
+		end
+
+		local chainedPromise = ...
+
+		local promise = chainedPromise:andThen(
+			function(...)
+				self:_resolve(...)
+			end,
+			function(...)
+				local maybeRuntimeError = chainedPromise._values[1]
+
+				-- Backwards compatibility < v2
+				if chainedPromise._error then
+					maybeRuntimeError = Error.new({
+						error = chainedPromise._error,
+						kind = Error.Kind.ExecutionError,
+						context = "[No stack trace available as this Promise originated from an older version of the Promise library (< v2)]",
+					})
+				end
+
+				if Error.isKind(maybeRuntimeError, Error.Kind.ExecutionError) then
+					return self:_reject(maybeRuntimeError:extend({
+						error = "This Promise was chained to a Promise that errored.",
+						trace = "",
+						context = string.format(
+							"The Promise at:\n\n%s\n...Rejected because it was chained to the following Promise, which encountered an error:\n",
+							self._source
+						),
+					}))
+				end
+
+				self:_reject(...)
+			end
+		)
+
+		if promise._status == Promise.Status.Cancelled then
+			self:cancel()
+		elseif promise._status == Promise.Status.Started then
+			-- Adopt ourselves into promise for cancellation propagation.
+			self._parent = promise
+			promise._consumers[self] = true
+		end
+
+		return
+	end
+
+	self._status = Promise.Status.Resolved
+	self._valuesLength, self._values = pack(...)
+
+	-- We assume that these callbacks will not throw errors.
+	for _, callback in ipairs(self._queuedResolve) do
+		coroutine.wrap(callback)(...)
+	end
+
+	self:_finalize()
+end
+
+function Promise.prototype:_reject(...)
+	if self._status ~= Promise.Status.Started then
+		return
+	end
+
+	self._status = Promise.Status.Rejected
+	self._valuesLength, self._values = pack(...)
+
+	-- If there are any rejection handlers, call those!
+	if not isEmpty(self._queuedReject) then
+		-- We assume that these callbacks will not throw errors.
+		for _, callback in ipairs(self._queuedReject) do
+			coroutine.wrap(callback)(...)
+		end
+	else
+		-- At this point, no one was able to observe the error.
+		-- An error handler might still be attached if the error occurred
+		-- synchronously. We'll wait one tick, and if there are still no
+		-- observers, then we should put a message in the console.
+
+		local err = tostring((...))
+
+		coroutine.wrap(function()
+			Promise._timeEvent:Wait()
+
+			-- Someone observed the error, hooray!
+			if not self._unhandledRejection then
+				return
+			end
+
+			-- Build a reasonable message
+			local message = string.format(
+				"Unhandled Promise rejection:\n\n%s\n\n%s",
+				err,
+				self._source
+			)
+
+			if Promise.TEST then
+				-- Don't spam output when we're running tests.
+				return
+			end
+
+			warn(message)
+		end)()
+	end
+
+	self:_finalize()
+end
+
+--[[
+	Calls any :finally handlers. We need this to be a separate method and
+	queue because we must call all of the finally callbacks upon a success,
+	failure, *and* cancellation.
+]]
+function Promise.prototype:_finalize()
+	for _, callback in ipairs(self._queuedFinally) do
+		-- Purposefully not passing values to callbacks here, as it could be the
+		-- resolved values, or rejected errors. If the developer needs the values,
+		-- they should use :andThen or :catch explicitly.
+		coroutine.wrap(callback)(self._status)
+	end
+
+	self._queuedFinally = nil
+	self._queuedReject = nil
+	self._queuedResolve = nil
+
+	-- Clear references to other Promises to allow gc
+	if not Promise.TEST then
+		self._parent = nil
+		self._consumers = nil
+	end
+end
+
+--[[
+	Chains a Promise from this one that is resolved if this Promise is
+	resolved, and rejected if it is not resolved.
+]]
+function Promise.prototype:now(rejectionValue)
+	local traceback = debug.traceback(nil, 2)
+	if self:getStatus() == Promise.Status.Resolved then
+		return self:_andThen(traceback, function(...)
+			return ...
+		end)
+	else
+		return Promise.reject(rejectionValue == nil and Error.new({
+			kind = Error.Kind.NotResolvedInTime,
+			error = "This Promise was not resolved in time for :now()",
+			context = ":now() was called at:\n\n" .. traceback,
+		}) or rejectionValue)
+	end
+end
+
+--[[
+	Retries a Promise-returning callback N times until it succeeds.
+]]
+function Promise.retry(callback, times, ...)
+	assert(type(callback) == "function", "Parameter #1 to Promise.retry must be a function")
+	assert(type(times) == "number", "Parameter #2 to Promise.retry must be a number")
+
+	local args, length = {...}, select("#", ...)
+
+	return Promise.resolve(callback(...)):catch(function(...)
+		if times > 0 then
+			return Promise.retry(callback, times - 1, unpack(args, 1, length))
+		else
+			return Promise.reject(...)
+		end
+	end)
+end
+
+--[[
+	Converts an event into a Promise with an optional predicate
+]]
+function Promise.fromEvent(event, predicate)
+	predicate = predicate or function()
+		return true
+	end
+
+	return Promise._new(debug.traceback(nil, 2), function(resolve, reject, onCancel)
+		local connection
+		local shouldDisconnect = false
+
+		local function disconnect()
+			connection:Disconnect()
+			connection = nil
+		end
+
+		-- We use shouldDisconnect because if the callback given to Connect is called before
+		-- Connect returns, connection will still be nil. This happens with events that queue up
+		-- events when there's nothing connected, such as RemoteEvents
+
+		connection = event:Connect(function(...)
+			local callbackValue = predicate(...)
+
+			if callbackValue == true then
+				resolve(...)
+
+				if connection then
+					disconnect()
+				else
+					shouldDisconnect = true
+				end
+			elseif type(callbackValue) ~= "boolean" then
+				error("Promise.fromEvent predicate should always return a boolean")
+			end
+		end)
+
+		if shouldDisconnect and connection then
+			return disconnect()
+		end
+
+		onCancel(function()
+			disconnect()
+		end)
+	end)
+end
+
+return Promise
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">RuntimeLib</string>
+          <string name="Source"><![CDATA[local Promise = require(script.Parent.Promise)
+
+local RunService = game:GetService("RunService")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+
+local TS = {}
+
+TS.Promise = Promise
+
+local function isPlugin(object)
+	return RunService:IsStudio() and object:FindFirstAncestorWhichIsA("Plugin") ~= nil
+end
+
+function TS.getModule(object, scope, moduleName)
+	if moduleName == nil then
+		moduleName = scope
+		scope = "@rbxts"
+	end
+
+	if RunService:IsRunning() and object:IsDescendantOf(ReplicatedFirst) then
+		warn("roblox-ts packages should not be used from ReplicatedFirst!")
+	end
+
+	-- ensure modules have fully replicated
+	if RunService:IsRunning() and RunService:IsClient() and not isPlugin(object) and not game:IsLoaded() then
+		game.Loaded:Wait()
+	end
+
+	local globalModules = script.Parent:FindFirstChild("node_modules")
+	if not globalModules then
+		error("Could not find any modules!", 2)
+	end
+
+	repeat
+		local modules = object:FindFirstChild("node_modules")
+		if modules and modules ~= globalModules then
+			modules = modules:FindFirstChild("@rbxts")
+		end
+		if modules then
+			local module = modules:FindFirstChild(moduleName)
+			if module then
+				return module
+			end
+		end
+		object = object.Parent
+	until object == nil or object == globalModules
+
+	local scopedModules = globalModules:FindFirstChild(scope or "@rbxts");
+	return (scopedModules or globalModules):FindFirstChild(moduleName) or error("Could not find module: " .. moduleName, 2)
+end
+
+-- This is a hash which TS.import uses as a kind of linked-list-like history of [Script who Loaded] -> Library
+local currentlyLoading = {}
+local registeredLibraries = {}
+
+function TS.import(caller, module, ...)
+	for i = 1, select("#", ...) do
+		module = module:WaitForChild((select(i, ...)))
+	end
+
+	if module.ClassName ~= "ModuleScript" then
+		error("Failed to import! Expected ModuleScript, got " .. module.ClassName, 2)
+	end
+
+	currentlyLoading[caller] = module
+
+	-- Check to see if a case like this occurs:
+	-- module -> Module1 -> Module2 -> module
+
+	-- WHERE currentlyLoading[module] is Module1
+	-- and currentlyLoading[Module1] is Module2
+	-- and currentlyLoading[Module2] is module
+
+	local currentModule = module
+	local depth = 0
+
+	while currentModule do
+		depth = depth + 1
+		currentModule = currentlyLoading[currentModule]
+
+		if currentModule == module then
+			local str = currentModule.Name -- Get the string traceback
+
+			for _ = 1, depth do
+				currentModule = currentlyLoading[currentModule]
+				str = str .. "  ⇒ " .. currentModule.Name
+			end
+
+			error("Failed to import! Detected a circular dependency chain: " .. str, 2)
+		end
+	end
+
+	if not registeredLibraries[module] then
+		if _G[module] then
+			error(
+				"Invalid module access! Do you have two TS runtimes trying to import this? " .. module:GetFullName(),
+				2
+			)
+		end
+
+		_G[module] = TS
+		registeredLibraries[module] = true -- register as already loaded for subsequent calls
+	end
+
+	local data = require(module)
+
+	if currentlyLoading[caller] == module then -- Thread-safe cleanup!
+		currentlyLoading[caller] = nil
+	end
+
+	return data
+end
+
+function TS.instanceof(obj, class)
+	-- custom Class.instanceof() check
+	if type(class) == "table" and type(class.instanceof) == "function" then
+		return class.instanceof(obj)
+	end
+
+	-- metatable check
+	if type(obj) == "table" then
+		obj = getmetatable(obj)
+		while obj ~= nil do
+			if obj == class then
+				return true
+			end
+			local mt = getmetatable(obj)
+			if mt then
+				obj = mt.__index
+			else
+				obj = nil
+			end
+		end
+	end
+
+	return false
+end
+
+function TS.async(callback)
+	return function(...)
+		local n = select("#", ...)
+		local args = { ... }
+		return Promise.new(function(resolve, reject)
+			coroutine.wrap(function()
+				local ok, result = pcall(callback, unpack(args, 1, n))
+				if ok then
+					resolve(result)
+				else
+					reject(result)
+				end
+			end)()
+		end)
+	end
+end
+
+function TS.await(promise)
+	if not Promise.is(promise) then
+		return promise
+	end
+
+	local status, value = promise:awaitStatus()
+	if status == Promise.Status.Resolved then
+		return value
+	elseif status == Promise.Status.Rejected then
+		error(value, 2)
+	else
+		error("The awaited Promise was cancelled", 2)
+	end
+end
+
+function TS.bit_lrsh(a, b)
+	local absA = math.abs(a)
+	local result = bit32.rshift(absA, b)
+	if a == absA then
+		return result
+	else
+		return -result - 1
+	end
+end
+
+TS.TRY_RETURN = 1
+TS.TRY_BREAK = 2
+TS.TRY_CONTINUE = 3
+
+function TS.try(func, catch, finally)
+	local err, traceback
+	local success, exitType, returns = xpcall(
+		func,
+		function(errInner)
+			err = errInner
+			traceback = debug.traceback()
+		end
+	)
+	if not success and catch then
+		local newExitType, newReturns = catch(err, traceback)
+		if newExitType then
+			exitType, returns = newExitType, newReturns
+		end
+	end
+	if finally then
+		local newExitType, newReturns = finally()
+		if newExitType then
+			exitType, returns = newExitType, newReturns
+		end
+	end
+	return exitType, returns
+end
+
+function TS.generator(callback)
+	local co = coroutine.create(callback)
+	return {
+		next = function(...)
+			if coroutine.status(co) == "dead" then
+				return { done = true }
+			else
+				local success, value = coroutine.resume(co, ...)
+				if success == false then
+					error(value, 2)
+				end
+				return {
+					value = value,
+					done = coroutine.status(co) == "dead",
+				}
+			end
+		end,
+	}
+end
+
+return TS
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="10">
+        <Properties>
+          <string name="Name">node_modules</string>
+        </Properties>
+        <Item class="Folder" referent="11">
+          <Properties>
+            <string name="Name">baseplate</string>
+          </Properties>
+          <Item class="ModuleScript" referent="12">
+            <Properties>
+              <string name="Name">out</string>
+              <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+local DEFAULT_PROPERTIES = {
+	Anchored = true,
+	Position = Vector3.new(0, -0.5, 0),
+	Size = Vector3.new(512, 1, 512),
+	BackSurface = Enum.SurfaceType.Universal,
+	BottomSurface = Enum.SurfaceType.Universal,
+	FrontSurface = Enum.SurfaceType.Universal,
+	LeftSurface = Enum.SurfaceType.Universal,
+	RightSurface = Enum.SurfaceType.Universal,
+	TopSurface = Enum.SurfaceType.Universal,
+	Parent = game:GetService("Workspace"),
+}
+local function apply(object, props)
+	for key, value in pairs(props) do
+		object[key] = value
+	end
+end
+local function createBaseplate(settings)
+	local part = Instance.new("Part")
+	apply(part, DEFAULT_PROPERTIES)
+	if settings then
+		apply(part, settings)
+	end
+	return part
+end
+return {
+	createBaseplate = createBaseplate,
+}
+]]></string>
+            </Properties>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="13">
+          <Properties>
+            <string name="Name">compiler-types</string>
+          </Properties>
+          <Item class="Folder" referent="14">
+            <Properties>
+              <string name="Name">types</string>
+            </Properties>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="15">
+          <Properties>
+            <string name="Name">dumpster</string>
+          </Properties>
+          <Item class="ModuleScript" referent="16">
+            <Properties>
+              <string name="Name">Dumpster</string>
+              <string name="Source"><![CDATA[local DESTROY_METHODS = { "destroy", "Destroy", "Disconnect" }
+
+local Dumpster = {} do
+	Dumpster.__index = Dumpster
+
+	local finalizers = {
+		["function"] = function(item)
+			item()
+		end,
+		["Instance"] = function(item)
+			item:Destroy()
+		end,
+		["RBXScriptConnection"] = function(item)
+			item:Disconnect()
+		end,
+		["table"] = function(item)
+			for _, methodName in ipairs(DESTROY_METHODS) do
+				if item[methodName] then
+					item[methodName](item)
+				end
+			end
+		end
+	}
+
+	function Dumpster.new()
+		return setmetatable({}, Dumpster)
+	end
+
+	function Dumpster:dump(item, finalizer)
+		self[item] = finalizer or finalizers[typeof(item)]
+		return self
+	end
+
+	function Dumpster:burn()
+		local item, finalizer = next(self)
+		while item ~= nil do
+			finalizer(item)
+			self[item] = nil
+			item, finalizer = next(self)
+		end
+	end
+
+	Dumpster.destroy = Dumpster.burn
+end
+
+return {
+	Dumpster = Dumpster
+}
+]]></string>
+            </Properties>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="17">
+          <Properties>
+            <string name="Name">networked-signals</string>
+          </Properties>
+          <Item class="Folder" referent="18">
+            <Properties>
+              <string name="Name">node_modules</string>
+            </Properties>
+            <Item class="Folder" referent="19">
+              <Properties>
+                <string name="Name">@rbxts</string>
+              </Properties>
+              <Item class="Folder" referent="20">
+                <Properties>
+                  <string name="Name">t</string>
+                </Properties>
+                <Item class="Folder" referent="21">
+                  <Properties>
+                    <string name="Name">lib</string>
+                  </Properties>
+                  <Item class="ModuleScript" referent="22">
+                    <Properties>
+                      <string name="Name">ts</string>
+                      <string name="Source">-- t: a runtime typechecker for Roblox
+
+-- regular lua compatibility
+local typeof = typeof or type
+
+local function primitive(typeName)
+	return function(value)
+		local valueType = typeof(value)
+		if valueType == typeName then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+local t = {}
+
+function t.any(value)
+	if value ~= nil then
+		return true
+	else
+		return false
+	end
+end
+
+--Lua primitives
+
+t.boolean = primitive("boolean")
+t.thread = primitive("thread")
+t.callback = primitive("function")
+t["function"] = t.callback
+t.none = primitive("nil")
+t["nil"] = t.none
+t.string = primitive("string")
+t.table = primitive("table")
+t.userdata = primitive("userdata")
+
+function t.number(value)
+	local valueType = typeof(value)
+	if valueType == "number" then
+		if value == value then
+			return true
+		else
+			return false
+		end
+	else
+		return false
+	end
+end
+
+function t.nan(value)
+	if value ~= value then
+		return true
+	else
+		return false
+	end
+end
+
+-- roblox types
+
+t.Axes = primitive("Axes")
+t.BrickColor = primitive("BrickColor")
+t.CFrame = primitive("CFrame")
+t.Color3 = primitive("Color3")
+t.ColorSequence = primitive("ColorSequence")
+t.ColorSequenceKeypoint = primitive("ColorSequenceKeypoint")
+t.DockWidgetPluginGuiInfo = primitive("DockWidgetPluginGuiInfo")
+t.Faces = primitive("Faces")
+t.Instance = primitive("Instance")
+t.NumberRange = primitive("NumberRange")
+t.NumberSequence = primitive("NumberSequence")
+t.NumberSequenceKeypoint = primitive("NumberSequenceKeypoint")
+t.PathWaypoint = primitive("PathWaypoint")
+t.PhysicalProperties = primitive("PhysicalProperties")
+t.Random = primitive("Random")
+t.Ray = primitive("Ray")
+t.Rect = primitive("Rect")
+t.Region3 = primitive("Region3")
+t.Region3int16 = primitive("Region3int16")
+t.TweenInfo = primitive("TweenInfo")
+t.UDim = primitive("UDim")
+t.UDim2 = primitive("UDim2")
+t.Vector2 = primitive("Vector2")
+t.Vector3 = primitive("Vector3")
+t.Vector3int16 = primitive("Vector3int16")
+t.Enum = primitive("Enum")
+t.EnumItem = primitive("EnumItem")
+t.RBXScriptSignal = primitive("RBXScriptSignal")
+t.RBXScriptConnection = primitive("RBXScriptConnection")
+
+function t.literal(...)
+	local size = select("#", ...)
+	if size == 1 then
+		local literal = ...
+		return function(value)
+			if value ~= literal then
+				return false
+			end
+			return true
+		end
+	else
+		local literals = {}
+		for i = 1, size do
+			local value = select(i, ...)
+			literals[i] = t.literal(value)
+		end
+		return t.union(unpack(literals))
+	end
+end
+
+t.exactly = t.literal
+
+function t.keyOf(keyTable)
+	local keys = {}
+	for key in pairs(keyTable) do
+		keys[#keys + 1] = key
+	end
+	return t.literal(unpack(keys))
+end
+
+function t.valueOf(valueTable)
+	local values = {}
+	for _, value in pairs(valueTable) do
+		values[#values + 1] = value
+	end
+	return t.literal(unpack(values))
+end
+
+function t.integer(value)
+	local success = t.number(value)
+	if not success then
+		return false
+	end
+	if value%1 == 0 then
+		return true
+	else
+		return false
+	end
+end
+
+function t.numberMin(min)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+		if value >= min then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+function t.numberMax(max)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+		if value &lt;= max then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+function t.numberMinExclusive(min)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+		if min &lt; value then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+function t.numberMaxExclusive(max)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+		if value &lt; max then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+t.numberPositive = t.numberMinExclusive(0)
+t.numberNegative = t.numberMaxExclusive(0)
+
+function t.numberConstrained(min, max)
+	assert(t.number(min) and t.number(max))
+	local minCheck = t.numberMin(min)
+	local maxCheck = t.numberMax(max)
+	return function(value)
+		local minSuccess = minCheck(value)
+		if not minSuccess then
+			return false
+		end
+
+		local maxSuccess = maxCheck(value)
+		if not maxSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+function t.numberConstrainedExclusive(min, max)
+	assert(t.number(min) and t.number(max))
+	local minCheck = t.numberMinExclusive(min)
+	local maxCheck = t.numberMaxExclusive(max)
+	return function(value)
+		local minSuccess = minCheck(value)
+		if not minSuccess then
+			return false
+		end
+
+		local maxSuccess = maxCheck(value)
+		if not maxSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+function t.match(pattern)
+	assert(t.string(pattern))
+	return function(value)
+		local stringSuccess = t.string(value)
+		if not stringSuccess then
+			return false
+		end
+
+		if string.match(value, pattern) == nil then
+			return false
+		end
+
+		return true
+	end
+end
+
+function t.optional(check)
+	assert(t.callback(check))
+	return function(value)
+		if value == nil then
+			return true
+		end
+		local success = check(value)
+		if success then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+function t.tuple(...)
+	local checks = {...}
+	return function(...)
+		local args = {...}
+		for i = 1, #checks do
+			local success = checks[i](args[i])
+			if success == false then
+				return false
+			end
+		end
+		return true
+	end
+end
+
+function t.keys(check)
+	assert(t.callback(check))
+	return function(value)
+		local tableSuccess = t.table(value)
+		if tableSuccess == false then
+			return false
+		end
+
+		for key in pairs(value) do
+			local success = check(key)
+			if success == false then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+function t.values(check)
+	assert(t.callback(check))
+	return function(value)
+		local tableSuccess = t.table(value)
+		if tableSuccess == false then
+			return false
+		end
+
+		for _, val in pairs(value) do
+			local success = check(val)
+			if success == false then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+function t.map(keyCheck, valueCheck)
+	assert(t.callback(keyCheck), t.callback(valueCheck))
+	local keyChecker = t.keys(keyCheck)
+	local valueChecker = t.values(valueCheck)
+	return function(value)
+		local keySuccess = keyChecker(value)
+		if not keySuccess then
+			return false
+		end
+
+		local valueSuccess = valueChecker(value)
+		if not valueSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+function t.set(valueCheck)
+	return t.map(valueCheck, t.literal(true))
+end
+
+do
+	local arrayKeysCheck = t.keys(t.integer)
+
+	function t.array(check)
+		assert(t.callback(check))
+		local valuesCheck = t.values(check)
+		return function(value)
+			local keySuccess = arrayKeysCheck(value)
+			if keySuccess == false then
+				return false
+			end
+
+			-- # is unreliable for sparse arrays
+			-- Count upwards using ipairs to avoid false positives from the behavior of #
+			local arraySize = 0
+
+			for _, _ in ipairs(value) do
+				arraySize = arraySize + 1
+			end
+
+			for key in pairs(value) do
+				if key &lt; 1 or key > arraySize then
+					return false
+				end
+			end
+
+			local valueSuccess = valuesCheck(value)
+			if not valueSuccess then
+				return false
+			end
+
+			return true
+		end
+	end
+
+	function t.strictArray(...)
+		local valueTypes = { ... }
+		assert(t.array(t.callback)(valueTypes))
+
+		return function(value)
+			local keySuccess = arrayKeysCheck(value)
+			if keySuccess == false then
+				return false
+			end
+
+			-- If there's more than the set array size, disallow
+			if #valueTypes &lt; #value then
+				return false
+			end
+
+			for idx, typeFn in pairs(valueTypes) do
+				local typeSuccess = typeFn(value[idx])
+				if not typeSuccess then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+do
+	local callbackArray = t.array(t.callback)
+
+	function t.union(...)
+		local checks = {...}
+		assert(callbackArray(checks))
+		return function(value)
+			for _, check in pairs(checks) do
+				if check(value) then
+					return true
+				end
+			end
+			return false
+		end
+	end
+
+	function t.intersection(...)
+		local checks = {...}
+		assert(callbackArray(checks))
+		return function(value)
+			for _, check in pairs(checks) do
+				local success = check(value)
+				if not success then
+					return false
+				end
+			end
+			return true
+		end
+	end
+end
+
+do
+	local checkInterface = t.map(t.any, t.callback)
+
+	function t.interface(checkTable)
+		assert(checkInterface(checkTable))
+		return function(value)
+			local tableSuccess = t.table(value)
+			if tableSuccess == false then
+				return false
+			end
+
+			for key, check in pairs(checkTable) do
+				local success = check(value[key])
+				if success == false then
+					return false
+				end
+			end
+			return true
+		end
+	end
+
+	function t.strictInterface(checkTable)
+		assert(checkInterface(checkTable))
+		return function(value)
+			local tableSuccess = t.table(value)
+			if tableSuccess == false then
+				return false
+			end
+
+			for key, check in pairs(checkTable) do
+				local success = check(value[key])
+				if success == false then
+					return false
+				end
+			end
+
+			for key in pairs(value) do
+				if not checkTable[key] then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+function t.instanceOf(className)
+	assert(t.string(className))
+	return function(value)
+		local instanceSuccess = t.Instance(value)
+		if not instanceSuccess then
+			return false
+		end
+
+		if value.ClassName ~= className then
+			return false
+		end
+
+		return true
+	end
+end
+t.instance = t.instanceOf
+
+function t.instanceIsA(className)
+	assert(t.string(className))
+	return function(value)
+		local instanceSuccess = t.Instance(value)
+		if not instanceSuccess then
+			return false
+		end
+
+		if not value:IsA(className) then
+			return false
+		end
+
+		return true
+	end
+end
+
+function t.enum(enum)
+	assert(t.Enum(enum))
+	return function(value)
+		local enumItemSuccess = t.EnumItem(value)
+		if not enumItemSuccess then
+			return false
+		end
+
+		if value.EnumType == enum then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+do
+	local checkWrap = t.tuple(t.callback, t.callback)
+
+	function t.wrap(callback, checkArgs)
+		assert(checkWrap(callback, checkArgs))
+		return function(...)
+			assert(checkArgs(...))
+			return callback(...)
+		end
+	end
+end
+
+function t.strict(check)
+	return function(...)
+		assert(check(...))
+	end
+end
+
+do
+	local checkChildren = t.map(t.string, t.callback)
+	function t.children(checkTable)
+		assert(checkChildren(checkTable))
+
+		return function(value)
+			local instanceSuccess = t.Instance(value)
+			if not instanceSuccess then
+				return false
+			end
+
+			local childrenByName = {}
+			for _, child in pairs(value:GetChildren()) do
+				local name = child.Name
+				if checkTable[name] then
+					if childrenByName[name] then
+						return false
+					end
+					childrenByName[name] = child
+				end
+			end
+
+			for name, check in pairs(checkTable) do
+				local success = check(childrenByName[name])
+				if not success then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+return t</string>
+                    </Properties>
+                  </Item>
+                </Item>
+              </Item>
+            </Item>
+          </Item>
+          <Item class="ModuleScript" referent="23">
+            <Properties>
+              <string name="Name">out</string>
+              <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local exports = {}
+-- Implementation
+for _0, _1 in pairs(TS.import(script, script, "implementation", "ClientSignalListener")) do
+	exports[_0] = _1
+end
+for _0, _1 in pairs(TS.import(script, script, "implementation", "ClientSignalSender")) do
+	exports[_0] = _1
+end
+for _0, _1 in pairs(TS.import(script, script, "implementation", "ServerSignalListener")) do
+	exports[_0] = _1
+end
+for _0, _1 in pairs(TS.import(script, script, "implementation", "ServerSignalSender")) do
+	exports[_0] = _1
+end
+-- Interfaces
+-- Types
+return exports
+]]></string>
+            </Properties>
+            <Item class="Folder" referent="24">
+              <Properties>
+                <string name="Name">factories</string>
+              </Properties>
+              <Item class="ModuleScript" referent="25">
+                <Properties>
+                  <string name="Name">InstanceFactory</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local InstanceFactory
+do
+	InstanceFactory = setmetatable({}, {
+		__tostring = function()
+			return "InstanceFactory"
+		end,
+	})
+	InstanceFactory.__index = InstanceFactory
+	function InstanceFactory.new(...)
+		local self = setmetatable({}, InstanceFactory)
+		self:constructor(...)
+		return self
+	end
+	function InstanceFactory:constructor()
+	end
+	function InstanceFactory:createInstance(className, parent)
+		return Instance.new(className, parent)
+	end
+end
+return {
+	InstanceFactory = InstanceFactory,
+}
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="26">
+              <Properties>
+                <string name="Name">functions</string>
+              </Properties>
+              <Item class="ModuleScript" referent="27">
+                <Properties>
+                  <string name="Name">WaitForChildWhichIsA</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local function waitForChildWhichIsA(parent, className)
+	local existing = parent:FindFirstChildWhichIsA(className)
+	if existing ~= nil then
+		return existing
+	end
+	while true do
+		local newChild = parent.ChildAdded:Wait()
+		if newChild:IsA(className) then
+			return newChild
+		end
+	end
+end
+return {
+	waitForChildWhichIsA = waitForChildWhichIsA,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="28">
+                <Properties>
+                  <string name="Name">WaitForNamedChildWhichIsA</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local function waitForNamedChildWhichIsA(parent, name, className)
+	for _, child in ipairs(parent:GetChildren()) do
+		if child.Name == name and child:IsA(className) then
+			return child
+		end
+	end
+	while true do
+		local newChild = parent.ChildAdded:Wait()
+		if newChild.Name == name and newChild:IsA(className) then
+			return newChild
+		end
+	end
+end
+return {
+	waitForNamedChildWhichIsA = waitForNamedChildWhichIsA,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="29">
+                <Properties>
+                  <string name="Name">checkMiddlewareFuncsAsync</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local checkMiddlewareFuncsAsync = TS.async(function(payload, middlewareFuncs)
+	for _, middlewareFunc in ipairs(middlewareFuncs) do
+		if not (TS.await(middlewareFunc(payload))) then
+			return false
+		end
+	end
+	return true
+end)
+return {
+	checkMiddlewareFuncsAsync = checkMiddlewareFuncsAsync,
+}
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="30">
+              <Properties>
+                <string name="Name">implementation</string>
+              </Properties>
+              <Item class="ModuleScript" referent="31">
+                <Properties>
+                  <string name="Name">ClientSignalListener</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local RunService = TS.import(script, TS.getModule(script, "services")).RunService
+local t = TS.import(script, TS.getModule(script, "t").lib.ts)
+local InstanceFactory = TS.import(script, script.Parent.Parent, "factories", "InstanceFactory").InstanceFactory
+local IS_STUDIO = RunService:IsStudio()
+local ClientSignalListener
+do
+	ClientSignalListener = setmetatable({}, {
+		__tostring = function()
+			return "ClientSignalListener"
+		end,
+	})
+	ClientSignalListener.__index = ClientSignalListener
+	function ClientSignalListener.new(...)
+		local self = setmetatable({}, ClientSignalListener)
+		self:constructor(...)
+		return self
+	end
+	function ClientSignalListener:constructor(description, instanceFactory, parent)
+		if not RunService:IsServer() then
+			error("Attempt to create a ClientSignalListener from client")
+		end
+		self.middlewareFuncs = description.clientSignalListenerMiddleware
+		self.name = description.name
+		self.typeChecks = description.typeChecks
+		local numberOfRequiredArguments = #self.typeChecks
+		while numberOfRequiredArguments > 0 and self.typeChecks[numberOfRequiredArguments - 1 + 1](nil) do
+			numberOfRequiredArguments -= 1
+		end
+		self.minNumberOfArguments = numberOfRequiredArguments
+		local remoteEventCandidate = parent:FindFirstChild(description.name)
+		if remoteEventCandidate ~= nil and remoteEventCandidate:IsA("RemoteEvent") then
+			self.remoteEvent = remoteEventCandidate
+		else
+			local newRemoteEvent = instanceFactory:createInstance("RemoteEvent")
+			newRemoteEvent.Name = description.name
+			newRemoteEvent.Parent = parent
+			self.remoteEvent = newRemoteEvent
+		end
+	end
+	function ClientSignalListener:create(parent, description)
+		return ClientSignalListener.new(description, InstanceFactory.new(), parent)
+	end
+	function ClientSignalListener:connect(callback)
+		return self.remoteEvent.OnServerEvent:Connect(TS.async(function(player, ...)
+			local args = { ... }
+			if not self:doArgumentsSatisfyChecks(args) then
+				return nil
+			end
+			callback(player, unpack(args))
+		end))
+	end
+	function ClientSignalListener:destroy()
+		self.remoteEvent:Destroy()
+	end
+	function ClientSignalListener:wait()
+		while true do
+			local waitResults = { self.remoteEvent.OnServerEvent:Wait() }
+			if self:doArgumentsSatisfyChecksWithPlayerArg(waitResults) then
+				return waitResults
+			end
+		end
+	end
+	function ClientSignalListener:doArgumentsSatisfyChecks(args)
+		local numberOfArgumentsProvided = #args
+		if #self.typeChecks < numberOfArgumentsProvided or numberOfArgumentsProvided < self.minNumberOfArguments then
+			if IS_STUDIO then
+				error("Invalid number of arguments passed to client signal " .. self.name .. ". Expected at least " .. tostring(self.minNumberOfArguments) .. " and at most " .. tostring(#self.typeChecks) .. ", got " .. tostring(numberOfArgumentsProvided) .. ".")
+			end
+			return false
+		end
+		do
+			local _0 = 0
+			while _0 < numberOfArgumentsProvided do
+				local i = _0
+				if not self.typeChecks[i + 1](args[i + 1]) then
+					if IS_STUDIO then
+						error("Argument " .. tostring(i) .. " does not pass type check for client signal " .. self.name .. " - given value: " .. tostring(args[i + 1]))
+					end
+					return false
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+		return true
+	end
+	function ClientSignalListener:doArgumentsSatisfyChecksWithPlayerArg(args)
+		if not t.instanceIsA("Player")(args[1]) then
+			return false
+		end
+		-- +1 for player arg
+		if #args ~= #self.typeChecks + 1 then
+			if IS_STUDIO then
+				error("Invalid number of arguments passed to client signal " .. self.name)
+			end
+			return false
+		end
+		do
+			local _0 = 0
+			while _0 < #args - 1 do
+				local i = _0
+				-- +1 for player arg
+				if not self.typeChecks[i + 1](args[i + 1 + 1]) then
+					if IS_STUDIO then
+						error("Argument " .. tostring(i) .. " does not pass type check for client signal " .. self.remoteEvent.Name .. " - given value: " .. tostring(args[i + 1 + 1]))
+					end
+					return false
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+		return true
+	end
+end
+return {
+	ClientSignalListener = ClientSignalListener,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="32">
+                <Properties>
+                  <string name="Name">ClientSignalSender</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local RunService = TS.import(script, TS.getModule(script, "services")).RunService
+local waitForNamedChildWhichIsA = TS.import(script, script.Parent.Parent, "functions", "WaitForNamedChildWhichIsA").waitForNamedChildWhichIsA
+local ClientSignalSender
+do
+	ClientSignalSender = setmetatable({}, {
+		__tostring = function()
+			return "ClientSignalSender"
+		end,
+	})
+	ClientSignalSender.__index = ClientSignalSender
+	function ClientSignalSender.new(...)
+		local self = setmetatable({}, ClientSignalSender)
+		self:constructor(...)
+		return self
+	end
+	function ClientSignalSender:constructor(parent, description)
+		if not RunService:IsClient() then
+			error("Attempt to create a ClientSignalSender from server")
+		end
+		self.remoteEvent = waitForNamedChildWhichIsA(parent, description.name, "RemoteEvent")
+	end
+	function ClientSignalSender:create(parent, description)
+		return ClientSignalSender.new(parent, description)
+	end
+	function ClientSignalSender:destroy()
+		self.remoteEvent = nil
+	end
+	function ClientSignalSender:fire(...)
+		local args = { ... }
+		if self.remoteEvent == nil then
+			error("Cannot fire a destroyed ClientSignalSender")
+		end
+		self.remoteEvent:FireServer(unpack(args))
+	end
+end
+return {
+	ClientSignalSender = ClientSignalSender,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="33">
+                <Properties>
+                  <string name="Name">ServerSignalListener</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local RunService = TS.import(script, TS.getModule(script, "services")).RunService
+local waitForNamedChildWhichIsA = TS.import(script, script.Parent.Parent, "functions", "WaitForNamedChildWhichIsA").waitForNamedChildWhichIsA
+local checkMiddlewareFuncsAsync = TS.import(script, script.Parent.Parent, "functions", "checkMiddlewareFuncsAsync").checkMiddlewareFuncsAsync
+local IS_STUDIO = RunService:IsStudio()
+local ServerSignalListener
+do
+	ServerSignalListener = setmetatable({}, {
+		__tostring = function()
+			return "ServerSignalListener"
+		end,
+	})
+	ServerSignalListener.__index = ServerSignalListener
+	function ServerSignalListener.new(...)
+		local self = setmetatable({}, ServerSignalListener)
+		self:constructor(...)
+		return self
+	end
+	function ServerSignalListener:constructor(parent, description, shouldCheckInboundArgumentTypes)
+		if not RunService:IsClient() then
+			error("Attempt to create a ServerSignalListener from server")
+		end
+		self.middlewareFuncs = description.serverSignalListenerMiddleware
+		self.name = description.name
+		self.typeChecks = description.typeChecks
+		local _0 = shouldCheckInboundArgumentTypes
+		if _0 == nil then
+			_0 = true
+		end
+		self.shouldCheckInboundArgumentTypes = _0
+		local numberOfRequiredArguments = #self.typeChecks
+		while numberOfRequiredArguments > 0 and self.typeChecks[numberOfRequiredArguments - 1 + 1](nil) do
+			numberOfRequiredArguments -= 1
+		end
+		self.minNumberOfArguments = numberOfRequiredArguments
+		self.remoteEvent = waitForNamedChildWhichIsA(parent, description.name, "RemoteEvent")
+	end
+	function ServerSignalListener:create(parent, description, shouldCheckInboundArgumentTypes)
+		return ServerSignalListener.new(parent, description, shouldCheckInboundArgumentTypes)
+	end
+	function ServerSignalListener:connect(callback)
+		if self.remoteEvent == nil then
+			error("Cannot connect to destroyed ServerSignalListener")
+		end
+		return self.remoteEvent.OnClientEvent:Connect(TS.async(function(...)
+			local args = { ... }
+			if not self:areArgumentsValid(args) then
+				if IS_STUDIO then
+					error("Invalid arguments passed to server signal " .. self.name)
+				end
+				return nil
+			end
+			if self.middlewareFuncs ~= nil then
+				local payload = {
+					args = args,
+					signalName = self.name,
+				}
+				if not (TS.await(checkMiddlewareFuncsAsync(payload, self.middlewareFuncs))) then
+					return nil
+				end
+			end
+			callback(unpack(args))
+		end))
+	end
+	function ServerSignalListener:destroy()
+		self.remoteEvent = nil
+	end
+	function ServerSignalListener:wait()
+		if self.remoteEvent == nil then
+			error("Cannot wait for destroyed ServerSignalListener")
+		end
+		while true do
+			local waitResults = { self.remoteEvent.OnClientEvent:Wait() }
+			if self:areArgumentsValid(waitResults) then
+				return waitResults
+			end
+		end
+	end
+	function ServerSignalListener:areArgumentsValid(args)
+		-- Yes, this is basically just a type assertion for TypeScript if this.shouldCheckInboundArgumentTypes is false
+		-- That's okay - this is client side and is checking arguments from the server, so it should be safe
+		if not self.shouldCheckInboundArgumentTypes or self:doArgumentsSatisfyChecks(args) then
+			return true
+		end
+		if IS_STUDIO then
+			-- eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+			error("Invalid arguments passed to server signal '" .. self.name .. "'")
+		end
+		return false
+	end
+	function ServerSignalListener:doArgumentsSatisfyChecks(args)
+		local numberOfArgumentsProvided = #args
+		if #self.typeChecks < numberOfArgumentsProvided or numberOfArgumentsProvided < self.minNumberOfArguments then
+			if IS_STUDIO then
+				error("Invalid number of arguments passed to server signal '" .. self.name .. "'. Expected at least " .. tostring(self.minNumberOfArguments) .. " and at most " .. tostring(#self.typeChecks) .. ", got " .. tostring(numberOfArgumentsProvided) .. ".")
+			end
+			return false
+		end
+		do
+			local _0 = 0
+			while _0 < #args do
+				local i = _0
+				if not self.typeChecks[i + 1](args[i + 1]) then
+					if IS_STUDIO then
+						error("Argument " .. tostring(i) .. " does not pass type check for server signal " .. self.remoteEvent.Name .. " - given value: " .. tostring(args[i + 1]))
+					end
+					return false
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+		return true
+	end
+end
+return {
+	ServerSignalListener = ServerSignalListener,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="34">
+                <Properties>
+                  <string name="Name">ServerSignalSender</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+local TS = _G[script]
+local _0 = TS.import(script, TS.getModule(script, "services"))
+local Players = _0.Players
+local RunService = _0.RunService
+local InstanceFactory = TS.import(script, script.Parent.Parent, "factories", "InstanceFactory").InstanceFactory
+local ServerSignalSender
+do
+	ServerSignalSender = setmetatable({}, {
+		__tostring = function()
+			return "ServerSignalSender"
+		end,
+	})
+	ServerSignalSender.__index = ServerSignalSender
+	function ServerSignalSender.new(...)
+		local self = setmetatable({}, ServerSignalSender)
+		self:constructor(...)
+		return self
+	end
+	function ServerSignalSender:constructor(description, instanceFactory, parent)
+		if not RunService:IsServer() then
+			error("Attempt to create a ServerSignalSender from client")
+		end
+		local remoteEventCandidate = parent:FindFirstChild(description.name)
+		if remoteEventCandidate ~= nil and remoteEventCandidate:IsA("RemoteEvent") then
+			self.remoteEvent = remoteEventCandidate
+		else
+			local newRemoteEvent = instanceFactory:createInstance("RemoteEvent")
+			newRemoteEvent.Name = description.name
+			newRemoteEvent.Parent = parent
+			self.remoteEvent = newRemoteEvent
+		end
+	end
+	function ServerSignalSender:create(parent, description)
+		return ServerSignalSender.new(description, InstanceFactory.new(), parent)
+	end
+	function ServerSignalSender:destroy()
+		self.remoteEvent:Destroy()
+	end
+	function ServerSignalSender:fireToPlayer(player, ...)
+		local args = { ... }
+		self.remoteEvent:FireClient(player, unpack(args))
+	end
+	function ServerSignalSender:fireToAll(...)
+		local args = { ... }
+		self.remoteEvent:FireAllClients(unpack(args))
+	end
+	function ServerSignalSender:fireToWhitelist(playersWhitelist, ...)
+		local args = { ... }
+		local _1 = playersWhitelist
+		local _2 = function(player)
+			return self.remoteEvent:FireClient(player, unpack(args))
+		end
+		-- ▼ ReadonlyArray.forEach ▼
+		for _3, _4 in ipairs(_1) do
+			_2(_4, _3 - 1, _1)
+		end
+		-- ▲ ReadonlyArray.forEach ▲
+	end
+	function ServerSignalSender:fireToOthers(playersBlacklist, ...)
+		local args = { ... }
+		local _1 = {}
+		for _, _2 in ipairs(playersBlacklist) do
+			_1[_2] = true
+		end
+		local playersBlacklistSet = _1
+		local _2 = Players:GetPlayers()
+		local _3 = function(player)
+			local _4 = playersBlacklistSet
+			local _5 = player
+			return not (_4[_5] ~= nil)
+		end
+		-- ▼ ReadonlyArray.filter ▼
+		local _4 = {}
+		local _5 = 0
+		for _6, _7 in ipairs(_2) do
+			if _3(_7, _6 - 1, _2) == true then
+				_5 += 1
+				_4[_5] = _7
+			end
+		end
+		-- ▲ ReadonlyArray.filter ▲
+		local _6 = function(player)
+			return self.remoteEvent:FireClient(player, unpack(args))
+		end
+		-- ▼ ReadonlyArray.forEach ▼
+		for _7, _8 in ipairs(_4) do
+			_6(_8, _7 - 1, _4)
+		end
+		-- ▲ ReadonlyArray.forEach ▲
+	end
+end
+return {
+	ServerSignalSender = ServerSignalSender,
+}
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="35">
+              <Properties>
+                <string name="Name">interfaces</string>
+              </Properties>
+            </Item>
+            <Item class="Folder" referent="36">
+              <Properties>
+                <string name="Name">types</string>
+              </Properties>
+              <Item class="ModuleScript" referent="37">
+                <Properties>
+                  <string name="Name">MiddlewareTypes</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.14
+--[[
+	*
+	* A function, synchronous or asynchronous, that returns true if the handling of the signal can continue and false otherwise
+]]
+return nil
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="38">
+          <Properties>
+            <string name="Name">projectile</string>
+          </Properties>
+          <Item class="ModuleScript" referent="39">
+            <Properties>
+              <string name="Name">out</string>
+              <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+local TS = _G[script]
+local exports = {}
+-- Classes
+exports.CylinderRenderer = TS.import(script, script, "Implementation", "Renderers", "CylinderRenderer").CylinderRenderer
+exports.PartRenderer = TS.import(script, script, "Implementation", "Renderers", "PartRenderer").PartRenderer
+exports.Projectile = TS.import(script, script, "Implementation", "Projectile").Projectile
+-- Interfaces
+-- Types
+return exports
+]]></string>
+            </Properties>
+            <Item class="Folder" referent="40">
+              <Properties>
+                <string name="Name">Implementation</string>
+              </Properties>
+              <Item class="ModuleScript" referent="41">
+                <Properties>
+                  <string name="Name">Projectile</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+local TS = _G[script]
+local CylinderRenderer = TS.import(script, script.Parent, "Renderers", "CylinderRenderer").CylinderRenderer
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+--[[
+	*
+	* A projectile that simulates physical interactions with the world according to the given configuration
+]]
+local Projectile
+do
+	Projectile = setmetatable({}, {
+		__tostring = function()
+			return "Projectile"
+		end,
+	})
+	Projectile.__index = Projectile
+	function Projectile.new(...)
+		local self = setmetatable({}, Projectile)
+		self:constructor(...)
+		return self
+	end
+	function Projectile:constructor(config)
+		self.distanceSq = 0
+		-- default values
+		local _0 = config
+		local bounce = _0.bounce
+		if bounce == nil then
+			bounce = false
+		end
+		local canCollide = _0.canCollide
+		if canCollide == nil then
+			canCollide = true
+		end
+		local life = _0.life
+		if life == nil then
+			life = 2
+		end
+		local maxRange = _0.maxRange
+		if maxRange == nil then
+			maxRange = 5000
+		end
+		local minExitVelocity = _0.minExitVelocity
+		if minExitVelocity == nil then
+			minExitVelocity = 100
+		end
+		local penetration = _0.penetration
+		if penetration == nil then
+			penetration = false
+		end
+		local physicsIgnore = _0.physicsIgnore
+		if physicsIgnore == nil then
+			physicsIgnore = {}
+		end
+		local renderer = _0.renderer
+		if renderer == nil then
+			renderer = CylinderRenderer.new(Color3.new(1, 1, 1))
+		end
+		local resistance = _0.resistance
+		if resistance == nil then
+			resistance = 1
+		end
+		self.px = config.position.X
+		self.py = config.position.Y
+		self.pz = config.position.Z
+		self.vx = config.velocity.X
+		self.vy = config.velocity.Y
+		self.vz = config.velocity.Z
+		self.ax = config.acceleration.X
+		self.ay = config.acceleration.Y
+		self.az = config.acceleration.Z
+		self.bounce = bounce
+		self.canCollide = canCollide
+		self.lifeTime = Projectile.elapsedTime + life
+		self.maxRangeSq = maxRange ^ 2
+		self.minExitVelocity = minExitVelocity
+		local _1 = {}
+		local _2 = #_1
+		for _3, _4 in ipairs(Projectile.globalPhysicsIgnore) do
+			_1[_2 + _3] = _4
+		end
+		_2 = #_1
+		for _3, _4 in ipairs(renderer.physicsIgnore) do
+			_1[_2 + _3] = _4
+		end
+		_2 = #_1
+		for _3, _4 in ipairs(physicsIgnore) do
+			_1[_2 + _3] = _4
+		end
+		self.physicsIgnore = _1
+		self.penetration = penetration
+		self.resistance = resistance
+		self.onTouch = config.onTouch
+		self.renderer = renderer
+		local _3 = Projectile.projectiles
+		local _4 = self
+		-- ▼ Array.push ▼
+		_3[#_3 + 1] = _4
+		-- ▲ Array.push ▲
+	end
+	function Projectile:addToPhysicsIgnore(object)
+		for _, v in ipairs(Projectile.globalPhysicsIgnore) do
+			if v == object then
+				return nil
+			end
+		end
+		local _0 = Projectile.globalPhysicsIgnore
+		local _1 = object
+		-- ▼ Array.push ▼
+		_0[#_0 + 1] = _1
+		-- ▲ Array.push ▲
+		object:GetPropertyChangedSignal("Parent"):Connect(function()
+			if not object.Parent then
+				local _2 = Projectile.globalPhysicsIgnore
+				local _3 = object
+				local index = (table.find(_2, _3) or 0) - 1
+				if index ~= -1 then
+					local _4 = Projectile.globalPhysicsIgnore
+					local _5 = index
+					table.remove(_4, _5 + 1)
+				end
+			end
+		end)
+	end
+	function Projectile:raycast(start, direction, ignore)
+		return Workspace:FindPartOnRayWithIgnoreList(Ray.new(start, direction), ignore, false, true)
+	end
+	function Projectile:step(dt)
+		-- store original position
+		local pxOrig = self.px
+		local pyOrig = self.py
+		local pzOrig = self.pz
+		-- store original velocity
+		local vxOrig = self.vx
+		local vyOrig = self.vy
+		local vzOrig = self.vz
+		-- update velocity
+		self.vx += dt * self.ax
+		self.vy += dt * self.ay
+		self.vz += dt * self.az
+		-- expected delta
+		local dx = (dt * (vxOrig + self.vx)) / 2
+		local dy = (dt * (vyOrig + self.vy)) / 2
+		local dz = (dt * (vzOrig + self.vz)) / 2
+		if self.canCollide and (dx ~= 0 or dy ~= 0 or dz ~= 0) then
+			local dir = Vector3.new(dx, dy, dz)
+			local startPos = Vector3.new(self.px, self.py, self.pz)
+			local part, pos, norm = Projectile:raycast(startPos, dir, self.physicsIgnore)
+			if part then
+				local didPenetrate = false
+				if self.penetration then
+					local unitDir = dir.Unit
+					local _0 = unitDir
+					local _1 = part.Size.Magnitude
+					local exitDir = _0 * _1
+					local _, nextPos = Projectile:raycast(pos, exitDir, self.physicsIgnore)
+					local _, exit = Projectile:raycast(nextPos, exitDir * (-1), self.physicsIgnore)
+					local _2 = unitDir
+					local _3 = exit
+					local _4 = pos
+					local distance = _2:Dot(_3 - _4)
+					if distance > 0 then
+						local currentVelocity = Vector3.new(vxOrig, vyOrig, vzOrig).Magnitude
+						if distance < math.log(currentVelocity / self.minExitVelocity) / self.resistance then
+							self.px = exit.X
+							self.py = exit.Y
+							self.pz = exit.Z
+							local gv = math.exp(-self.resistance * distance)
+							self.vx *= gv
+							self.vy *= gv
+							self.vz *= gv
+							didPenetrate = true
+						end
+					end
+				end
+				if not didPenetrate then
+					self.px = pos.X
+					self.py = pos.Y
+					self.pz = pos.Z
+					if self.bounce then
+						local vDot = -2 * (self.vx * norm.X + self.vy * norm.Y + self.vz * norm.Z)
+						local RS = 0.9
+						self.vx = RS * (vDot * norm.X + self.vx)
+						self.vy = RS * (vDot * norm.Y + self.vy)
+						self.vz = RS * (vDot * norm.Z + self.vz)
+					else
+						self:remove()
+					end
+				end
+				local _0 = self.onTouch
+				if _0 ~= 0 and _0 == _0 and _0 ~= "" and _0 then
+					_0 = self.onTouch(part, pos, norm, Vector3.new(self.vx, self.vy, self.vz).Unit) == true
+				end
+				if _0 then
+					self:remove(true)
+					return nil
+				end
+			else
+				self.px = pos.X
+				self.py = pos.Y
+				self.pz = pos.Z
+			end
+			-- actual delta
+			dx = self.px - pxOrig
+			dy = self.py - pyOrig
+			dz = self.pz - pzOrig
+		else
+			-- no collision, move without raycasting
+			self.px += dx
+			self.py += dy
+			self.pz += dz
+		end
+		-- remove if distance is too far
+		self.distanceSq += dx ^ 2 + dy ^ 2 + dz ^ 2
+		if self.distanceSq > self.maxRangeSq then
+			self:remove()
+			return nil
+		end
+		-- render
+		local origPos = Vector3.new(pxOrig, pyOrig, pzOrig)
+		local direction = Vector3.new(dx, dy, dz)
+		self.renderer:render(origPos, direction.Unit)
+	end
+	function Projectile:remove(instantly)
+		if instantly == nil then
+			instantly = false
+		end
+		if instantly then
+			self.renderer:destroy()
+		end
+		local _0 = Projectile.removeList
+		local _1 = self
+		-- ▼ Set.add ▼
+		_0[_1] = true
+		-- ▲ Set.add ▲
+	end
+	Projectile.elapsedTime = 0
+	Projectile.projectiles = {}
+	Projectile.removeList = {}
+	Projectile.globalPhysicsIgnore = {}
+end
+local raycastIgnore = Workspace:FindFirstChild("Ignore")
+if raycastIgnore then
+	local _0 = Projectile.globalPhysicsIgnore
+	local _1 = raycastIgnore
+	-- ▼ Array.push ▼
+	_0[#_0 + 1] = _1
+	-- ▲ Array.push ▲
+end
+RunService.RenderStepped:Connect(function(dt)
+	Projectile.elapsedTime += dt
+	local newProjectiles = {}
+	for _, p in ipairs(Projectile.projectiles) do
+		local _0 = Projectile.removeList
+		local _1 = p
+		local _2 = _0[_1] ~= nil
+		if not _2 then
+			_2 = p.lifeTime < Projectile.elapsedTime
+		end
+		if _2 then
+			p.renderer:destroy()
+			local _3 = Projectile.removeList
+			local _4 = p
+			-- ▼ Set.delete ▼
+			_3[_4] = nil
+			-- ▲ Set.delete ▲
+		else
+			local _3 = newProjectiles
+			local _4 = p
+			-- ▼ Array.push ▼
+			_3[#_3 + 1] = _4
+			-- ▲ Array.push ▲
+			p:step(dt)
+		end
+	end
+	Projectile.projectiles = newProjectiles
+end)
+return {
+	Projectile = Projectile,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="Folder" referent="42">
+                <Properties>
+                  <string name="Name">Renderers</string>
+                </Properties>
+                <Item class="ModuleScript" referent="43">
+                  <Properties>
+                    <string name="Name">CylinderRenderer</string>
+                    <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+local Workspace = game:GetService("Workspace")
+local DEFAULT_RADIUS = 0.05
+local recyclables = {}
+--[[
+	*
+	* A lightweight renderer that uses CylinderHandleAdornments to render the movement of projectiles frame by frame
+	* Unless you _need_ a more specific renderer, this is highly encouraged!
+]]
+local CylinderRenderer
+do
+	CylinderRenderer = setmetatable({}, {
+		__tostring = function()
+			return "CylinderRenderer"
+		end,
+	})
+	CylinderRenderer.__index = CylinderRenderer
+	function CylinderRenderer.new(...)
+		local self = setmetatable({}, CylinderRenderer)
+		self:constructor(...)
+		return self
+	end
+	function CylinderRenderer:constructor(color, radius)
+		self.physicsIgnore = {}
+		self.cylinderHandleAdornment = CylinderRenderer:createCylinderAdornment(color, radius)
+	end
+	function CylinderRenderer:createCylinderAdornment(color, radius)
+		-- ▼ Array.pop ▼
+		local _0 = #recyclables
+		local _1 = recyclables[_0]
+		recyclables[_0] = nil
+		-- ▲ Array.pop ▲
+		local _2 = _1
+		if not _2 then
+			_2 = Instance.new("CylinderHandleAdornment")
+		end
+		local line = _2
+		line.Parent = Workspace.Terrain
+		line.Adornee = Workspace.Terrain
+		line.Color3 = color
+		line.Radius = radius ~= nil and radius or DEFAULT_RADIUS
+		return line
+	end
+	function CylinderRenderer:destroy()
+		self.cylinderHandleAdornment.Adornee = nil
+		local _0 = recyclables
+		local _1 = self.cylinderHandleAdornment
+		-- ▼ Array.push ▼
+		_0[#_0 + 1] = _1
+		-- ▲ Array.push ▲
+	end
+	function CylinderRenderer:render(position, directionUnit)
+		if self.previousPosition ~= nil then
+			local _0 = position
+			local _1 = self.previousPosition
+			local length = (_0 - _1).Magnitude
+			self.cylinderHandleAdornment.Height = length
+			local _2 = position
+			local _3 = directionUnit
+			local _4 = CFrame.new(position, _2 + _3)
+			local _5 = CFrame.new(0, 0, -length / 2)
+			self.cylinderHandleAdornment.CFrame = _4 * _5
+		end
+		self.previousPosition = position
+	end
+end
+return {
+	CylinderRenderer = CylinderRenderer,
+}
+]]></string>
+                  </Properties>
+                </Item>
+                <Item class="ModuleScript" referent="44">
+                  <Properties>
+                    <string name="Name">PartRenderer</string>
+                    <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+local Workspace = game:GetService("Workspace")
+--[[
+	*
+	* Renders a BasePart object as a projectile renderer
+]]
+local PartRenderer
+do
+	PartRenderer = setmetatable({}, {
+		__tostring = function()
+			return "PartRenderer"
+		end,
+	})
+	PartRenderer.__index = PartRenderer
+	function PartRenderer.new(...)
+		local self = setmetatable({}, PartRenderer)
+		self:constructor(...)
+		return self
+	end
+	function PartRenderer:constructor(templatePart, parent, offsetCFrame)
+		if parent == nil then
+			parent = Workspace
+		end
+		self.templatePart = templatePart:Clone()
+		self.templatePart.Anchored = true
+		self.templatePart.CanCollide = false
+		self.templatePart.Massless = true
+		self.templatePart.Parent = parent
+		self.offsetCFrame = offsetCFrame or CFrame.new()
+		self.physicsIgnore = { self.templatePart }
+	end
+	function PartRenderer:destroy()
+		self.templatePart:Destroy()
+	end
+	function PartRenderer:render(position, directionUnit)
+		local _0 = position
+		local _1 = directionUnit
+		local baseCFrame = CFrame.new(position, _0 + _1)
+		local _2 = baseCFrame
+		local _3 = self.offsetCFrame
+		self.templatePart.CFrame = _2 * _3
+	end
+end
+return {
+	PartRenderer = PartRenderer,
+}
+]]></string>
+                  </Properties>
+                </Item>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="45">
+              <Properties>
+                <string name="Name">Interfaces</string>
+              </Properties>
+              <Item class="ModuleScript" referent="46">
+                <Properties>
+                  <string name="Name">IRenderer</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+return nil
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="47">
+              <Properties>
+                <string name="Name">Types</string>
+              </Properties>
+              <Item class="ModuleScript" referent="48">
+                <Properties>
+                  <string name="Name">ProjectileConfig</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.1.1
+--[[
+	*
+	* Defines the set of configuration values for a Projectile
+]]
+return nil
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+          </Item>
+        </Item>
+        <Item class="ModuleScript" referent="49">
+          <Properties>
+            <string name="Name">services</string>
+            <string name="Source"><![CDATA[return setmetatable({}, {
+	__index = function(self, serviceName)
+		local service = game:GetService(serviceName)
+		self[serviceName] = service
+		return service
+	end,
+})
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="Folder" referent="50">
+          <Properties>
+            <string name="Name">signals-tooling</string>
+          </Properties>
+          <Item class="ModuleScript" referent="51">
+            <Properties>
+              <string name="Name">out</string>
+              <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.15
+local TS = _G[script]
+local exports = {}
+-- Interfaces
+-- Classes
+for _0, _1 in pairs(TS.import(script, script, "Implementation", "ConnectionManager")) do
+	exports[_0] = _1
+end
+for _0, _1 in pairs(TS.import(script, script, "Implementation", "Signal")) do
+	exports[_0] = _1
+end
+-- Types
+-- Functions
+for _0, _1 in pairs(TS.import(script, script, "Functions", "ListenOnce")) do
+	exports[_0] = _1
+end
+for _0, _1 in pairs(TS.import(script, script, "Functions", "WaitForFirstSignal")) do
+	exports[_0] = _1
+end
+return exports
+]]></string>
+            </Properties>
+            <Item class="Folder" referent="52">
+              <Properties>
+                <string name="Name">Functions</string>
+              </Properties>
+              <Item class="ModuleScript" referent="53">
+                <Properties>
+                  <string name="Name">ListenOnce</string>
+                  <string name="Source"><![CDATA[local exports = {}
+
+function exports.listenOnce(signal, callback)
+	local connection
+	connection = signal:Connect(function(...)
+		connection:Disconnect()
+		callback(...)
+	end)
+	return connection
+end
+
+return exports
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="54">
+                <Properties>
+                  <string name="Name">WaitForFirstSignal</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.15
+local TS = _G[script]
+local Signal = TS.import(script, script.Parent.Parent, "Implementation", "Signal").Signal
+-- Credit to Tiffblocks
+-- Adapted to TypeScript by NoahWillCode
+local function waitForFirstSignal(...)
+	local signals = { ... }
+	local finalSignal = Signal.new()
+	local connections = {}
+	do
+		local _0 = 0
+		while _0 < #signals do
+			local i = _0
+			local signal = signals[i + 1]
+			local _1 = connections
+			local _2 = signal:Connect(function(...)
+				local args = { ... }
+				finalSignal:fire(signal, args)
+			end)
+			-- ▼ Array.push ▼
+			_1[#_1 + 1] = _2
+			-- ▲ Array.push ▲
+			_0 = i
+			_0 += 1
+		end
+	end
+	local finalArgs = { finalSignal:Wait() }
+	do
+		local _0 = 0
+		while _0 < #connections do
+			local i = _0
+			connections[i + 1]:Disconnect()
+			_0 = i
+			_0 += 1
+		end
+	end
+	return unpack(finalArgs)
+end
+return {
+	waitForFirstSignal = waitForFirstSignal,
+}
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="55">
+              <Properties>
+                <string name="Name">Implementation</string>
+              </Properties>
+              <Item class="ModuleScript" referent="56">
+                <Properties>
+                  <string name="Name">ConnectionManager</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.15
+local ConnectionManager
+do
+	ConnectionManager = setmetatable({}, {
+		__tostring = function()
+			return "ConnectionManager"
+		end,
+	})
+	ConnectionManager.__index = ConnectionManager
+	function ConnectionManager.new(...)
+		local self = setmetatable({}, ConnectionManager)
+		self:constructor(...)
+		return self
+	end
+	function ConnectionManager:constructor()
+		self.connectionData = {}
+	end
+	function ConnectionManager:addConnectionData(signal, handlerFunction)
+		local _0 = self.connectionData
+		local _1 = {
+			HandlerFunction = handlerFunction,
+			Signal = signal,
+		}
+		-- ▼ Array.push ▼
+		_0[#_0 + 1] = _1
+		-- ▲ Array.push ▲
+	end
+	function ConnectionManager:connectAll()
+		do
+			local _0 = 0
+			while _0 < #self.connectionData do
+				local i = _0
+				local connectionInfo = self.connectionData[i + 1]
+				if connectionInfo.Connection == nil then
+					connectionInfo.Connection = connectionInfo.Signal:Connect(connectionInfo.HandlerFunction)
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+	end
+	function ConnectionManager:connectToEvent(signal, handlerFunction)
+		local connection = signal:Connect(handlerFunction)
+		local _0 = self.connectionData
+		local _1 = {
+			Connection = connection,
+			HandlerFunction = handlerFunction,
+			Signal = signal,
+		}
+		-- ▼ Array.push ▼
+		_0[#_0 + 1] = _1
+		-- ▲ Array.push ▲
+	end
+	function ConnectionManager:disconnectAll()
+		do
+			local _0 = 0
+			while _0 < #self.connectionData do
+				local i = _0
+				local connectionInfo = self.connectionData[i + 1]
+				if connectionInfo.Connection ~= nil then
+					connectionInfo.Connection:Disconnect()
+					connectionInfo.Connection = nil
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+	end
+	function ConnectionManager:reset()
+		self:disconnectAll()
+		self.connectionData = {}
+	end
+end
+return {
+	ConnectionManager = ConnectionManager,
+}
+]]></string>
+                </Properties>
+              </Item>
+              <Item class="ModuleScript" referent="57">
+                <Properties>
+                  <string name="Name">Signal</string>
+                  <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.0.0-beta.15
+local TS = _G[script]
+local RunService = TS.import(script, TS.getModule(script, "services")).RunService
+local SignalConnection
+do
+	SignalConnection = setmetatable({}, {
+		__tostring = function()
+			return "SignalConnection"
+		end,
+	})
+	SignalConnection.__index = SignalConnection
+	function SignalConnection.new(...)
+		local self = setmetatable({}, SignalConnection)
+		self:constructor(...)
+		return self
+	end
+	function SignalConnection:constructor(disconnectCallback)
+		self.Connected = true
+		self.disconnectCallback = disconnectCallback
+	end
+	function SignalConnection:Disconnect()
+		if not self.Connected then
+			return nil
+		end
+		self.disconnectCallback()
+		self.Connected = false
+	end
+end
+local Signal
+do
+	Signal = setmetatable({}, {
+		__tostring = function()
+			return "Signal"
+		end,
+	})
+	Signal.__index = Signal
+	function Signal.new(...)
+		local self = setmetatable({}, Signal)
+		self:constructor(...)
+		return self
+	end
+	function Signal:constructor()
+		self.connections = {}
+		self.connectionsHandlersMap = {}
+		self.lastFiredTick = 0
+		self.isDestroyed = false
+	end
+	function Signal:Connect(onFiredCallback)
+		if self.isDestroyed then
+			error("Cannot connect to a destroyed signal")
+		end
+		local connection
+		connection = SignalConnection.new(function()
+			local _0 = self.connectionsHandlersMap
+			local _1 = connection
+			if not (_0[_1] ~= nil) then
+				return nil
+			end
+			local _2 = self.connectionsHandlersMap
+			local _3 = connection
+			-- ▼ Map.delete ▼
+			_2[_3] = nil
+			-- ▲ Map.delete ▲
+			do
+				local _4 = 0
+				while _4 < #self.connections do
+					local i = _4
+					if self.connections[i + 1] == connection then
+						local _5 = self.connections
+						local _6 = i
+						table.remove(_5, _6 + 1)
+					end
+					_4 = i
+					_4 += 1
+				end
+			end
+		end)
+		local _0 = self.connectionsHandlersMap
+		local _1 = connection
+		local _2 = onFiredCallback
+		-- ▼ Map.set ▼
+		_0[_1] = _2
+		-- ▲ Map.set ▲
+		local _3 = self.connections
+		local _4 = connection
+		-- ▼ Array.push ▼
+		_3[#_3 + 1] = _4
+		-- ▲ Array.push ▲
+		return connection
+	end
+	function Signal:disconnectAll()
+		if self.isDestroyed then
+			error("Cannot disconnect connections to a destroyed signal")
+		end
+		-- Clear the handlers mapping first so that we don't get an O(n^2) runtime complexity (see disconnect callback)
+		local _0 = self.connectionsHandlersMap
+		-- ▼ Map.clear ▼
+		for _1 in pairs(_0) do
+			_0[_1] = nil
+		end
+		-- ▲ Map.clear ▲
+		do
+			local _1 = 0
+			while _1 < #self.connections do
+				local i = _1
+				self.connections[i + 1]:Disconnect()
+				_1 = i
+				_1 += 1
+			end
+		end
+		self.connections = {}
+	end
+	function Signal:destroy()
+		if self.isDestroyed then
+			return nil
+		end
+		self:disconnectAll()
+		self.isDestroyed = true
+	end
+	function Signal:fire(...)
+		local args = { ... }
+		if self.isDestroyed then
+			error("Cannot fire a destroyed signal")
+		end
+		self.lastFiredArgs = args
+		self.lastFiredTick = tick()
+		do
+			local _0 = 0
+			while _0 < #self.connections do
+				local i = _0
+				local _1 = self.connectionsHandlersMap
+				local _2 = self.connections[i + 1]
+				local handlerFunction = _1[_2]
+				if handlerFunction ~= nil then
+					coroutine.wrap(handlerFunction)(unpack(args))
+				end
+				_0 = i
+				_0 += 1
+			end
+		end
+	end
+	function Signal:Wait()
+		if self.isDestroyed then
+			error("Cannot wait for a destroyed signal")
+		end
+		local lastFiredTickAtStart = self.lastFiredTick
+		while self.lastFiredTick == lastFiredTickAtStart do
+			RunService.PostSimulation:Wait()
+		end
+		-- eslint-disable-next-line
+		return unpack(self.lastFiredArgs)
+	end
+end
+return {
+	Signal = Signal,
+}
+]]></string>
+                </Properties>
+              </Item>
+            </Item>
+            <Item class="Folder" referent="58">
+              <Properties>
+                <string name="Name">Interfaces</string>
+              </Properties>
+            </Item>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="59">
+          <Properties>
+            <string name="Name">t</string>
+          </Properties>
+          <Item class="Folder" referent="60">
+            <Properties>
+              <string name="Name">lib</string>
+            </Properties>
+            <Item class="ModuleScript" referent="61">
+              <Properties>
+                <string name="Name">ts</string>
+                <string name="Source"><![CDATA[-- t: a runtime typechecker for Roblox
+
+-- regular lua compatibility
+local typeof = typeof or type
+
+local function primitive(typeName)
+	return function(value)
+		local valueType = typeof(value)
+		if valueType == typeName then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+local t = {}
+
+--[[**
+	matches any type except nil
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.any(value)
+	if value ~= nil then
+		return true
+	else
+		return false
+	end
+end
+
+--Lua primitives
+
+--[[**
+	ensures Lua primitive boolean type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.boolean = primitive("boolean")
+
+--[[**
+	ensures Lua primitive thread type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.thread = primitive("thread")
+
+--[[**
+	ensures Lua primitive callback type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.callback = primitive("function")
+t["function"] = t.callback
+
+--[[**
+	ensures Lua primitive none type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.none = primitive("nil")
+t["nil"] = t.none
+
+--[[**
+	ensures Lua primitive string type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.string = primitive("string")
+
+--[[**
+	ensures Lua primitive table type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.table = primitive("table")
+
+--[[**
+	ensures Lua primitive userdata type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.userdata = primitive("userdata")
+
+--[[**
+	ensures value is a number and non-NaN
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.number(value)
+	local valueType = typeof(value)
+	if valueType == "number" then
+		if value == value then
+			return true
+		else
+			return false
+		end
+	else
+		return false
+	end
+end
+
+--[[**
+	ensures value is NaN
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.nan(value)
+	local valueType = typeof(value)
+	if valueType == "number" then
+		if value ~= value then
+			return true
+		else
+			return false
+		end
+	else
+		return false
+	end
+end
+
+-- roblox types
+
+--[[**
+	ensures Roblox Axes type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Axes = primitive("Axes")
+
+--[[**
+	ensures Roblox BrickColor type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.BrickColor = primitive("BrickColor")
+
+--[[**
+	ensures Roblox CFrame type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.CFrame = primitive("CFrame")
+
+--[[**
+	ensures Roblox Color3 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Color3 = primitive("Color3")
+
+--[[**
+	ensures Roblox ColorSequence type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.ColorSequence = primitive("ColorSequence")
+
+--[[**
+	ensures Roblox ColorSequenceKeypoint type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.ColorSequenceKeypoint = primitive("ColorSequenceKeypoint")
+
+--[[**
+	ensures Roblox DockWidgetPluginGuiInfo type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.DockWidgetPluginGuiInfo = primitive("DockWidgetPluginGuiInfo")
+
+--[[**
+	ensures Roblox Faces type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Faces = primitive("Faces")
+
+--[[**
+	ensures Roblox Instance type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Instance = primitive("Instance")
+
+--[[**
+	ensures Roblox NumberRange type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.NumberRange = primitive("NumberRange")
+
+--[[**
+	ensures Roblox NumberSequence type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.NumberSequence = primitive("NumberSequence")
+
+--[[**
+	ensures Roblox NumberSequenceKeypoint type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.NumberSequenceKeypoint = primitive("NumberSequenceKeypoint")
+
+--[[**
+	ensures Roblox PathWaypoint type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.PathWaypoint = primitive("PathWaypoint")
+
+--[[**
+	ensures Roblox PhysicalProperties type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.PhysicalProperties = primitive("PhysicalProperties")
+
+--[[**
+	ensures Roblox Random type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Random = primitive("Random")
+
+--[[**
+	ensures Roblox Ray type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Ray = primitive("Ray")
+
+--[[**
+	ensures Roblox Rect type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Rect = primitive("Rect")
+
+--[[**
+	ensures Roblox Region3 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Region3 = primitive("Region3")
+
+--[[**
+	ensures Roblox Region3int16 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Region3int16 = primitive("Region3int16")
+
+--[[**
+	ensures Roblox TweenInfo type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.TweenInfo = primitive("TweenInfo")
+
+--[[**
+	ensures Roblox UDim type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.UDim = primitive("UDim")
+
+--[[**
+	ensures Roblox UDim2 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.UDim2 = primitive("UDim2")
+
+--[[**
+	ensures Roblox Vector2 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Vector2 = primitive("Vector2")
+
+--[[**
+	ensures Roblox Vector3 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Vector3 = primitive("Vector3")
+
+--[[**
+	ensures Roblox Vector3int16 type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Vector3int16 = primitive("Vector3int16")
+
+-- roblox enum types
+
+--[[**
+	ensures Roblox Enum type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.Enum = primitive("Enum")
+
+--[[**
+	ensures Roblox EnumItem type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.EnumItem = primitive("EnumItem")
+
+--[[**
+	ensures Roblox RBXScriptSignal type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.RBXScriptSignal = primitive("RBXScriptSignal")
+
+--[[**
+	ensures Roblox RBXScriptConnection type
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+t.RBXScriptConnection = primitive("RBXScriptConnection")
+
+--[[**
+	ensures value is a given literal value
+
+	@param literal The literal to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.literal(...)
+	local size = select("#", ...)
+	if size == 1 then
+		local literal = ...
+		return function(value)
+			if value ~= literal then
+				return false
+			end
+
+			return true
+		end
+	else
+		local literals = {}
+		for i = 1, size do
+			local value = select(i, ...)
+			literals[i] = t.literal(value)
+		end
+
+		return t.union(table.unpack(literals, 1, size))
+	end
+end
+
+--[[**
+	DEPRECATED
+	Please use t.literal
+**--]]
+t.exactly = t.literal
+
+--[[**
+	Returns a t.union of each key in the table as a t.literal
+
+	@param keyTable The table to get keys from
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.keyOf(keyTable)
+	local keys = {}
+	local length = 0
+	for key in pairs(keyTable) do
+		length = length + 1
+		keys[length] = key
+	end
+
+	return t.literal(table.unpack(keys, 1, length))
+end
+
+--[[**
+	Returns a t.union of each value in the table as a t.literal
+
+	@param valueTable The table to get values from
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.valueOf(valueTable)
+	local values = {}
+	local length = 0
+	for _, value in pairs(valueTable) do
+		length = length + 1
+		values[length] = value
+	end
+
+	return t.literal(table.unpack(values, 1, length))
+end
+
+--[[**
+	ensures value is an integer
+
+	@param value The value to check against
+
+	@returns True iff the condition is satisfied, false otherwise
+**--]]
+function t.integer(value)
+	local success = t.number(value)
+	if not success then
+		return false
+	end
+
+	if value % 1 == 0 then
+		return true
+	else
+		return false
+	end
+end
+
+--[[**
+	ensures value is a number where min <= value
+
+	@param min The minimum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberMin(min)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+
+		if value >= min then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+--[[**
+	ensures value is a number where value <= max
+
+	@param max The maximum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberMax(max)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+
+		if value <= max then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+--[[**
+	ensures value is a number where min < value
+
+	@param min The minimum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberMinExclusive(min)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+
+		if min < value then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+--[[**
+	ensures value is a number where value < max
+
+	@param max The maximum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberMaxExclusive(max)
+	return function(value)
+		local success = t.number(value)
+		if not success then
+			return false
+		end
+
+		if value < max then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+--[[**
+	ensures value is a number where value > 0
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+t.numberPositive = t.numberMinExclusive(0)
+
+--[[**
+	ensures value is a number where value < 0
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+t.numberNegative = t.numberMaxExclusive(0)
+
+--[[**
+	ensures value is a number where min <= value <= max
+
+	@param min The minimum to use
+	@param max The maximum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberConstrained(min, max)
+	assert(t.number(min))
+	assert(t.number(max))
+	local minCheck = t.numberMin(min)
+	local maxCheck = t.numberMax(max)
+
+	return function(value)
+		local minSuccess = minCheck(value)
+		if not minSuccess then
+			return false
+		end
+
+		local maxSuccess = maxCheck(value)
+		if not maxSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value is a number where min < value < max
+
+	@param min The minimum to use
+	@param max The maximum to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.numberConstrainedExclusive(min, max)
+	assert(t.number(min))
+	assert(t.number(max))
+	local minCheck = t.numberMinExclusive(min)
+	local maxCheck = t.numberMaxExclusive(max)
+
+	return function(value)
+		local minSuccess = minCheck(value)
+		if not minSuccess then
+			return false
+		end
+
+		local maxSuccess = maxCheck(value)
+		if not maxSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value matches string pattern
+
+	@param string pattern to check against
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.match(pattern)
+	assert(t.string(pattern))
+	return function(value)
+		local stringSuccess = t.string(value)
+		if not stringSuccess then
+			return false
+		end
+
+		if string.match(value, pattern) == nil then
+			return false
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value is either nil or passes check
+
+	@param check The check to use
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.optional(check)
+	assert(t.callback(check))
+	return function(value)
+		if value == nil then
+			return true
+		end
+
+		local success = check(value)
+		if success then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+--[[**
+	matches given tuple against tuple type definition
+
+	@param ... The type definition for the tuples
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.tuple(...)
+	local checks = { ... }
+	return function(...)
+		local args = { ... }
+		for i, check in ipairs(checks) do
+			local success = check(args[i])
+			if success == false then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures all keys in given table pass check
+
+	@param check The function to use to check the keys
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.keys(check)
+	assert(t.callback(check))
+	return function(value)
+		local tableSuccess = t.table(value)
+		if tableSuccess == false then
+			return false
+		end
+
+		for key in pairs(value) do
+			local success = check(key)
+			if success == false then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures all values in given table pass check
+
+	@param check The function to use to check the values
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.values(check)
+	assert(t.callback(check))
+	return function(value)
+		local tableSuccess = t.table(value)
+		if tableSuccess == false then
+			return false
+		end
+
+		for _, val in pairs(value) do
+			local success = check(val)
+			if success == false then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value is a table and all keys pass keyCheck and all values pass valueCheck
+
+	@param keyCheck The function to use to check the keys
+	@param valueCheck The function to use to check the values
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.map(keyCheck, valueCheck)
+	assert(t.callback(keyCheck))
+	assert(t.callback(valueCheck))
+	local keyChecker = t.keys(keyCheck)
+	local valueChecker = t.values(valueCheck)
+
+	return function(value)
+		local keySuccess = keyChecker(value)
+		if not keySuccess then
+			return false
+		end
+
+		local valueSuccess = valueChecker(value)
+		if not valueSuccess then
+			return false
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value is a table and all keys pass valueCheck and all values are true
+
+	@param valueCheck The function to use to check the values
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.set(valueCheck)
+	return t.map(valueCheck, t.literal(true))
+end
+
+do
+	local arrayKeysCheck = t.keys(t.integer)
+--[[**
+		ensures value is an array and all values of the array match check
+
+		@param check The check to compare all values with
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.array(check)
+		assert(t.callback(check))
+		local valuesCheck = t.values(check)
+
+		return function(value)
+			local keySuccess = arrayKeysCheck(value)
+			if keySuccess == false then
+				return false
+			end
+
+			-- # is unreliable for sparse arrays
+			-- Count upwards using ipairs to avoid false positives from the behavior of #
+			local arraySize = 0
+
+			for _ in ipairs(value) do
+				arraySize = arraySize + 1
+			end
+
+			for key in pairs(value) do
+				if key < 1 or key > arraySize then
+					return false
+				end
+			end
+
+			local valueSuccess = valuesCheck(value)
+			if not valueSuccess then
+				return false
+			end
+
+			return true
+		end
+	end
+
+--[[**
+		ensures value is an array of a strict makeup and size
+
+		@param check The check to compare all values with
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.strictArray(...)
+		local valueTypes = { ... }
+		assert(t.array(t.callback)(valueTypes))
+
+		return function(value)
+			local keySuccess = arrayKeysCheck(value)
+			if keySuccess == false then
+				return false
+			end
+
+			-- If there's more than the set array size, disallow
+			if #valueTypes < #value then
+				return false
+			end
+
+			for idx, typeFn in pairs(valueTypes) do
+				local typeSuccess = typeFn(value[idx])
+				if not typeSuccess then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+do
+	local callbackArray = t.array(t.callback)
+--[[**
+		creates a union type
+
+		@param ... The checks to union
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.union(...)
+		local checks = { ... }
+		assert(callbackArray(checks))
+
+		return function(value)
+			for _, check in ipairs(checks) do
+				if check(value) then
+					return true
+				end
+			end
+
+			return false
+		end
+	end
+
+--[[**
+		Alias for t.union
+	**--]]
+	t.some = t.union
+
+--[[**
+		creates an intersection type
+
+		@param ... The checks to intersect
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.intersection(...)
+		local checks = { ... }
+		assert(callbackArray(checks))
+
+		return function(value)
+			for _, check in ipairs(checks) do
+				local success = check(value)
+				if not success then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+
+--[[**
+		Alias for t.intersection
+	**--]]
+	t.every = t.intersection
+end
+
+do
+	local checkInterface = t.map(t.any, t.callback)
+--[[**
+		ensures value matches given interface definition
+
+		@param checkTable The interface definition
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.interface(checkTable)
+		assert(checkInterface(checkTable))
+		return function(value)
+			local tableSuccess = t.table(value)
+			if tableSuccess == false then
+				return false
+			end
+
+			for key, check in pairs(checkTable) do
+				local success = check(value[key])
+				if success == false then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+
+--[[**
+		ensures value matches given interface definition strictly
+
+		@param checkTable The interface definition
+
+		@returns A function that will return true iff the condition is passed
+	**--]]
+	function t.strictInterface(checkTable)
+		assert(checkInterface(checkTable))
+		return function(value)
+			local tableSuccess = t.table(value)
+			if tableSuccess == false then
+				return false
+			end
+
+			for key, check in pairs(checkTable) do
+				local success = check(value[key])
+				if success == false then
+					return false
+				end
+			end
+
+			for key in pairs(value) do
+				if not checkTable[key] then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+--[[**
+	ensure value is an Instance and it's ClassName matches the given ClassName
+
+	@param className The class name to check for
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.instanceOf(className, childTable)
+	assert(t.string(className))
+
+	local childrenCheck
+	if childTable ~= nil then
+		childrenCheck = t.children(childTable)
+	end
+
+	return function(value)
+		local instanceSuccess = t.Instance(value)
+		if not instanceSuccess then
+			return false
+		end
+
+		if value.ClassName ~= className then
+			return false
+		end
+
+		if childrenCheck then
+			local childrenSuccess = childrenCheck(value)
+			if not childrenSuccess then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+t.instance = t.instanceOf
+
+--[[**
+	ensure value is an Instance and it's ClassName matches the given ClassName by an IsA comparison
+
+	@param className The class name to check for
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.instanceIsA(className, childTable)
+	assert(t.string(className))
+
+	local childrenCheck
+	if childTable ~= nil then
+		childrenCheck = t.children(childTable)
+	end
+
+	return function(value)
+		local instanceSuccess = t.Instance(value)
+		if not instanceSuccess then
+			return false
+		end
+
+		if not value:IsA(className) then
+			return false
+		end
+
+		if childrenCheck then
+			local childrenSuccess = childrenCheck(value)
+			if not childrenSuccess then
+				return false
+			end
+		end
+
+		return true
+	end
+end
+
+--[[**
+	ensures value is an enum of the correct type
+
+	@param enum The enum to check
+
+	@returns A function that will return true iff the condition is passed
+**--]]
+function t.enum(enum)
+	assert(t.Enum(enum))
+	return function(value)
+		local enumItemSuccess = t.EnumItem(value)
+		if not enumItemSuccess then
+			return false
+		end
+
+		if value.EnumType == enum then
+			return true
+		else
+			return false
+		end
+	end
+end
+
+do
+	local checkWrap = t.tuple(t.callback, t.callback)
+
+--[[**
+		wraps a callback in an assert with checkArgs
+
+		@param callback The function to wrap
+		@param checkArgs The functon to use to check arguments in the assert
+
+		@returns A function that first asserts using checkArgs and then calls callback
+	**--]]
+	function t.wrap(callback, checkArgs)
+		assert(checkWrap(callback, checkArgs))
+		return function(...)
+			assert(checkArgs(...))
+			return callback(...)
+		end
+	end
+end
+
+--[[**
+	asserts a given check
+
+	@param check The function to wrap with an assert
+
+	@returns A function that simply wraps the given check in an assert
+**--]]
+function t.strict(check)
+	return function(...)
+		assert(check(...))
+	end
+end
+
+do
+	local checkChildren = t.map(t.string, t.callback)
+
+--[[**
+		Takes a table where keys are child names and values are functions to check the children against.
+		Pass an instance tree into the function.
+		If at least one child passes each check, the overall check passes.
+
+		Warning! If you pass in a tree with more than one child of the same name, this function will always return false
+
+		@param checkTable The table to check against
+
+		@returns A function that checks an instance tree
+	**--]]
+	function t.children(checkTable)
+		assert(checkChildren(checkTable))
+
+		return function(value)
+			local instanceSuccess = t.Instance(value)
+			if not instanceSuccess then
+				return false
+			end
+
+			local childrenByName = {}
+			for _, child in ipairs(value:GetChildren()) do
+				local name = child.Name
+				if checkTable[name] then
+					if childrenByName[name] then
+						return false
+					end
+
+					childrenByName[name] = child
+				end
+			end
+
+			for name, check in pairs(checkTable) do
+				local success = check(childrenByName[name])
+				if not success then
+					return false
+				end
+			end
+
+			return true
+		end
+	end
+end
+
+return { t = t }
+]]></string>
+              </Properties>
+            </Item>
+          </Item>
+        </Item>
+        <Item class="Folder" referent="62">
+          <Properties>
+            <string name="Name">types</string>
+          </Properties>
+          <Item class="Folder" referent="63">
+            <Properties>
+              <string name="Name">include</string>
+            </Properties>
+            <Item class="Folder" referent="64">
+              <Properties>
+                <string name="Name">generated</string>
+              </Properties>
+            </Item>
+          </Item>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="65">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Folder" referent="66">
+      <Properties>
+        <string name="Name">TS</string>
+      </Properties>
+      <Item class="Script" referent="67">
+        <Properties>
+          <string name="Name">main</string>
+          <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.2.3
+local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
+local createBaseplate = TS.import(script, TS.getModule(script, "@rbxts", "baseplate").out).createBaseplate
+local _networked_signals = TS.import(script, TS.getModule(script, "@rbxts", "networked-signals").out)
+local ClientSignalListener = _networked_signals.ClientSignalListener
+local ServerSignalSender = _networked_signals.ServerSignalSender
+local _services = TS.import(script, TS.getModule(script, "@rbxts", "services"))
+local ReplicatedStorage = _services.ReplicatedStorage
+local Workspace = _services.Workspace
+local NetworkedSignalDescriptions = TS.import(script, game:GetService("ReplicatedStorage"), "TS", "NetworkedSignalDescriptions").NetworkedSignalDescriptions
+-- something to stand on
+createBaseplate()
+local projectileCreatedListener = ClientSignalListener:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ProjectileCreated)
+local projectileCreatedSender = ServerSignalSender:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ProjectileCreated)
+-- hot potato!
+projectileCreatedListener:connect(function(player, character, position, velocity, acceleration, color)
+	return projectileCreatedSender:fireToOthers({ player }, character, position, velocity, acceleration, color)
+end)
+local shootHumanoidSender = ClientSignalListener:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ShootHumanoid)
+shootHumanoidSender:connect(function(player, humanoid)
+	local playerCharacter = player.Character
+	if not playerCharacter or playerCharacter.Parent ~= Workspace then
+		return nil
+	end
+	local playerHumanoid = playerCharacter:FindFirstChildWhichIsA("Humanoid")
+	if not playerHumanoid or playerHumanoid.Health <= 0 then
+		return nil
+	end
+	humanoid:TakeDamage(100)
+end)
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="SoundService" referent="68">
+    <Properties>
+      <string name="Name">SoundService</string>
+      <bool name="RespectFilteringEnabled">true</bool>
+    </Properties>
+  </Item>
+  <Item class="StarterPack" referent="69">
+    <Properties>
+      <string name="Name">StarterPack</string>
+    </Properties>
+    <Item class="Tool" referent="70">
+      <Properties>
+        <string name="Name">LaserGun</string>
+      </Properties>
+      <Item class="Part" referent="71">
+        <Properties>
+          <string name="Name">Handle</string>
+          <bool name="Anchored">false</bool>
+          <BinaryString name="AttributesSerialize">
+          </BinaryString>
+          <float name="BackParamA">-0.5</float>
+          <float name="BackParamB">0.5</float>
+          <token name="BackSurface">0</token>
+          <token name="BackSurfaceInput">0</token>
+          <float name="BottomParamA">-0.5</float>
+          <float name="BottomParamB">0.5</float>
+          <token name="BottomSurface">0</token>
+          <token name="BottomSurfaceInput">0</token>
+          <CoordinateFrame name="CFrame">
+            <X>0</X>
+            <Y>1.100012</Y>
+            <Z>0</Z>
+            <R00>1</R00>
+            <R01>0</R01>
+            <R02>0</R02>
+            <R10>0</R10>
+            <R11>1</R11>
+            <R12>0</R12>
+            <R20>0</R20>
+            <R21>0</R21>
+            <R22>1</R22>
+          </CoordinateFrame>
+          <bool name="CanCollide">true</bool>
+          <bool name="CanQuery">true</bool>
+          <bool name="CanTouch">true</bool>
+          <bool name="CastShadow">true</bool>
+          <int name="CollisionGroupId">0</int>
+          <Color3uint8 name="Color3uint8">10724005</Color3uint8>
+          <PhysicalProperties name="CustomPhysicalProperties">
+            <CustomPhysics>false</CustomPhysics>
+          </PhysicalProperties>
+          <token name="formFactorRaw">1</token>
+          <float name="FrontParamA">-0.5</float>
+          <float name="FrontParamB">0.5</float>
+          <token name="FrontSurface">0</token>
+          <token name="FrontSurfaceInput">0</token>
+          <float name="LeftParamA">-0.5</float>
+          <float name="LeftParamB">0.5</float>
+          <token name="LeftSurface">0</token>
+          <token name="LeftSurfaceInput">0</token>
+          <bool name="Locked">false</bool>
+          <bool name="Massless">false</bool>
+          <token name="Material">272</token>
+          <Ref name="MaterialVariant">null</Ref>
+          <CoordinateFrame name="PivotOffset">
+            <X>0</X>
+            <Y>0</Y>
+            <Z>0</Z>
+            <R00>1</R00>
+            <R01>0</R01>
+            <R02>0</R02>
+            <R10>0</R10>
+            <R11>1</R11>
+            <R12>0</R12>
+            <R20>0</R20>
+            <R21>0</R21>
+            <R22>1</R22>
+          </CoordinateFrame>
+          <float name="Reflectance">0</float>
+          <float name="RightParamA">-0.5</float>
+          <float name="RightParamB">0.5</float>
+          <token name="RightSurface">0</token>
+          <token name="RightSurfaceInput">0</token>
+          <int name="RootPriority">0</int>
+          <Vector3 name="RotVelocity">
+            <X>0</X>
+            <Y>0</Y>
+            <Z>0</Z>
+          </Vector3>
+          <token name="shape">1</token>
+          <Vector3 name="size">
+            <X>1</X>
+            <Y>1</Y>
+            <Z>4</Z>
+          </Vector3>
+          <int name="SourceAssetId">-1</int>
+          <BinaryString name="Tags">
+          </BinaryString>
+          <float name="TopParamA">-0.5</float>
+          <float name="TopParamB">0.5</float>
+          <token name="TopSurface">0</token>
+          <token name="TopSurfaceInput">0</token>
+          <float name="Transparency">0</float>
+          <Vector3 name="Velocity">
+            <X>0</X>
+            <Y>0</Y>
+            <Z>0</Z>
+          </Vector3>
+        </Properties>
+        <Item class="Attachment" referent="72">
+          <Properties>
+            <string name="Name">Attachment</string>
+            <BinaryString name="AttributesSerialize">
+            </BinaryString>
+            <CoordinateFrame name="CFrame">
+              <X>0</X>
+              <Y>0</Y>
+              <Z>2</Z>
+              <R00>1</R00>
+              <R01>0</R01>
+              <R02>0</R02>
+              <R10>0</R10>
+              <R11>1</R11>
+              <R12>0</R12>
+              <R20>0</R20>
+              <R21>0</R21>
+              <R22>1</R22>
+            </CoordinateFrame>
+            <int name="SourceAssetId">-1</int>
+            <BinaryString name="Tags">
+            </BinaryString>
+            <bool name="Visible">false</bool>
+          </Properties>
+        </Item>
+      </Item>
+      <Item class="LocalScript" referent="73">
+        <Properties>
+          <string name="Name">LaserGun</string>
+          <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.2.3
+local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
+local ClientSignalSender = TS.import(script, TS.getModule(script, "@rbxts", "networked-signals").out).ClientSignalSender
+local _projectile = TS.import(script, TS.getModule(script, "@rbxts", "projectile").out)
+local CylinderRenderer = _projectile.CylinderRenderer
+local Projectile = _projectile.Projectile
+local _services = TS.import(script, TS.getModule(script, "@rbxts", "services"))
+local Players = _services.Players
+local ReplicatedStorage = _services.ReplicatedStorage
+local NetworkedSignalDescriptions = TS.import(script, game:GetService("ReplicatedStorage"), "TS", "NetworkedSignalDescriptions").NetworkedSignalDescriptions
+local getHumanoid = TS.import(script, game:GetService("ReplicatedStorage"), "TS", "util", "getHumanoid").getHumanoid
+local shootHumanoidSender = ClientSignalSender:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ShootHumanoid)
+local projectileCreatedSender = ClientSignalSender:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ProjectileCreated)
+-- constants
+local SHOT_COUNT = 3
+local INITIAL_VELOCITY = 75
+local GRAVITY = -50
+local MIN_SPREAD_ANGLE = math.rad(0)
+local MAX_SPREAD_ANGLE = math.rad(10)
+local tool = script.Parent
+local handle = tool:WaitForChild("Handle")
+local attachment = handle:WaitForChild("Attachment")
+local random = Random.new()
+local mouse = Players.LocalPlayer:GetMouse()
+local tag
+mouse.Button1Down:Connect(function()
+	local localTag = {}
+	tag = localTag
+	while tag == localTag do
+		local character = Players.LocalPlayer.Character
+		if not character or not tool:IsDescendantOf(character) then
+			break
+		end
+		local humanoid = character:FindFirstChildWhichIsA("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then
+			return nil
+		end
+		local position = attachment.WorldPosition
+		local endPos = mouse.Hit.Position
+		local acceleration = Vector3.new(0, GRAVITY, 0)
+		do
+			local i = 0
+			local _shouldIncrement = false
+			while true do
+				if _shouldIncrement then
+					i += 1
+				else
+					_shouldIncrement = true
+				end
+				if not (i < SHOT_COUNT) then
+					break
+				end
+				local _cFrame = CFrame.new(position, endPos)
+				local _arg0 = CFrame.Angles(0, 0, random:NextNumber(0, 2 * math.pi))
+				local _arg0_1 = CFrame.Angles(0, random:NextNumber(MIN_SPREAD_ANGLE, MAX_SPREAD_ANGLE), 0)
+				local velocity = (_cFrame * _arg0 * _arg0_1).LookVector * INITIAL_VELOCITY
+				local color = Color3.fromHSV(math.random(), 1, 1)
+				Projectile.new({
+					position = position,
+					velocity = velocity,
+					acceleration = acceleration,
+					bounce = true,
+					life = 4,
+					minExitVelocity = 50,
+					penetration = true,
+					physicsIgnore = { character },
+					renderer = CylinderRenderer.new(color),
+					onTouch = function(part)
+						local humanoid = getHumanoid(part)
+						if humanoid then
+							shootHumanoidSender:fire(humanoid)
+						end
+						return false
+					end,
+				})
+				projectileCreatedSender:fire(character, position, velocity, acceleration, color)
+			end
+		end
+		task.wait(1 / 30)
+	end
+end)
+mouse.Button1Up:Connect(function()
+	tag = nil
+end)
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="74">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="75">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="Folder" referent="76">
+        <Properties>
+          <string name="Name">TS</string>
+        </Properties>
+        <Item class="LocalScript" referent="77">
+          <Properties>
+            <string name="Name">main</string>
+            <string name="Source"><![CDATA[-- Compiled with roblox-ts v1.2.3
+local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
+local ServerSignalListener = TS.import(script, TS.getModule(script, "@rbxts", "networked-signals").out).ServerSignalListener
+local _projectile = TS.import(script, TS.getModule(script, "@rbxts", "projectile").out)
+local CylinderRenderer = _projectile.CylinderRenderer
+local Projectile = _projectile.Projectile
+local ReplicatedStorage = TS.import(script, TS.getModule(script, "@rbxts", "services")).ReplicatedStorage
+local NetworkedSignalDescriptions = TS.import(script, game:GetService("ReplicatedStorage"), "TS", "NetworkedSignalDescriptions").NetworkedSignalDescriptions
+-- renderer
+local projectileCreatedListener = ServerSignalListener:create(ReplicatedStorage.Events, NetworkedSignalDescriptions.ProjectileCreated)
+projectileCreatedListener:connect(function(character, position, velocity, acceleration, color)
+	Projectile.new({
+		position = position,
+		velocity = velocity,
+		acceleration = acceleration,
+		bounce = true,
+		life = 4,
+		minExitVelocity = 50,
+		penetration = true,
+		physicsIgnore = { character },
+		renderer = CylinderRenderer.new(color),
+	})
+end)
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="Workspace" referent="78">
+    <Properties>
+      <string name="Name">Workspace</string>
+      <bool name="FilteringEnabled">true</bool>
+    </Properties>
+  </Item>
+</roblox>

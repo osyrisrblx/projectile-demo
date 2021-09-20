@@ -1,0 +1,3 @@
+interface ReplicatedStorage {
+	Events: Folder;
+}
